@@ -25,6 +25,15 @@ OPENCV_BUILD=$SSD_ROOT/opencv_build
 OPENCV_INSTALL=$OPENCV_BUILD/install
 JOBS=3   # TX2는 코어/메모리가 제한적이라 병렬도를 낮게 유지한다 (nproc=4, RAM=8GB)
 
+# ROS2/colcon이 생성하는 setup.bash는 COLCON_TRACE 등을 기본값 없이 참조해서
+# `set -u`(nounset) 아래에서 소싱하면 "unbound variable"로 죽는다 — 소싱하는 동안만 풀어준다.
+source_ros2_setup() {
+  set +u
+  # shellcheck disable=SC1091
+  source "$ROS2_WS/install/setup.bash"
+  set -u
+}
+
 echo "== 1. apt 패키지 설치 (iproxy, colcon, 빌드 도구) =="
 sudo apt-get update || true   # /etc/apt/sources.list.d/ros2.list 의 잘못된 www.ros.org 항목 때문에 exit 100이 날 수 있음 (무해, 아래 참고)
 sudo apt-get install -y --no-install-recommends \
@@ -74,12 +83,15 @@ if [ ! -d "$ORB_STACK/ORB_SLAM3" ]; then
   git clone https://github.com/UZ-SLAMLab/ORB_SLAM3.git "$ORB_STACK/ORB_SLAM3"
 fi
 for m in DBoW2 g2o Sophus; do
+  # 이전 시도의 CMakeCache.txt가 남아있으면 -DOpenCV_DIR 등을 무시하고 캐시된 값을 재사용하므로 매번 새로 구성한다.
+  rm -rf "$ORB_STACK/ORB_SLAM3/Thirdparty/$m/build"
   mkdir -p "$ORB_STACK/ORB_SLAM3/Thirdparty/$m/build"
   cd "$ORB_STACK/ORB_SLAM3/Thirdparty/$m/build"
   cmake .. -DCMAKE_BUILD_TYPE=Release -DOpenCV_DIR="$OPENCV_INSTALL/lib/cmake/opencv4"
   make -j"$JOBS"
 done
 cd "$ORB_STACK/ORB_SLAM3/Vocabulary" && tar -xf ORBvoc.txt.tar.gz
+rm -rf "$ORB_STACK/ORB_SLAM3/build"
 mkdir -p "$ORB_STACK/ORB_SLAM3/build" && cd "$ORB_STACK/ORB_SLAM3/build"
 cmake .. -DCMAKE_BUILD_TYPE=Release \
   -DOpenCV_DIR="$OPENCV_INSTALL/lib/cmake/opencv4" \
@@ -92,15 +104,19 @@ cd "$ROS2_WS"
 if [ ! -f ros2.repos ]; then
   curl -sSL -o ros2.repos https://raw.githubusercontent.com/ros2/ros2/foxy/ros2.repos
 fi
-if [ ! -d src/ros2 ]; then
-  vcs import src < ros2.repos
-  # Foxy가 예전에 가리키던 Fast-DDS 의 "2.1.x" 브랜치가 업스트림에서 이름이 바뀌었다 (docs/tx2-build-notes.md)
+# vcs import는 이미 클론된 저장소를 건드리지 않고 재실행 가능하므로 매번 실행한다 — vcs import가
+# (네트워크 오류 등으로) 중간에 끊기면 일부 저장소만 존재하는 상태가 되는데, 이 블록 전체를
+# "src/ros2 디렉터리가 있으면 건너뛴다"로 가드하면 Fast-DDS 브랜치 수정과 GUI/데모 패키지 제거까지
+# 함께 건너뛰어져 버린다.
+vcs import src < ros2.repos
+# Foxy가 예전에 가리키던 Fast-DDS 의 "2.1.x" 브랜치가 업스트림에서 이름이 바뀌었다 (docs/tx2-build-notes.md)
+if [ -d src/eProsima/Fast-DDS ]; then
   (cd src/eProsima/Fast-DDS && git checkout v2.1.4)
-  # RViz/rqt 등은 이번 티켓 범위 밖이고, rosdep가 Bionic용 이름을 못 찾는 원인이기도 하다
-  rm -rf src/ros2/rviz src/ros-visualization src/ros/ros_tutorials \
-         src/ros2/demos src/ros2/examples src/ros2/performance_test_fixture \
-         src/ros2/ros1_bridge src/ros2/launch_ros/test_launch_ros
 fi
+# RViz/rqt 등은 이번 티켓 범위 밖이고, rosdep가 Bionic용 이름을 못 찾는 원인이기도 하다
+rm -rf src/ros2/rviz src/ros-visualization src/ros/ros_tutorials \
+       src/ros2/demos src/ros2/examples src/ros2/performance_test_fixture \
+       src/ros2/ros1_bridge src/ros2/launch_ros/test_launch_ros
 if [ ! -d src/ros-perception/vision_opencv ]; then
   mkdir -p src/ros-perception
   git clone -b foxy https://github.com/ros-perception/vision_opencv.git src/ros-perception/vision_opencv
@@ -116,13 +132,13 @@ rosdep install --from-paths src --ignore-src --rosdistro foxy -y \
 echo "== 7. ROS2 Foxy 빌드 =="
 colcon build --symlink-install --parallel-workers 1 \
   --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
-source install/setup.bash
+source_ros2_setup
 
 echo "== 8. cv_bridge / image_geometry 빌드 (ros2.repos엔 없음, 별도 clone) =="
 colcon build --symlink-install --packages-select cv_bridge image_geometry \
   --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
     -DOpenCV_DIR="$OPENCV_INSTALL/lib/cmake/opencv4"
-source install/setup.bash
+source_ros2_setup
 
 echo "== 9. zang09/ORB_SLAM3_ROS2 fork 빌드 (aisys-max/ORB_SLAM3_ROS2) =="
 mkdir -p src/slam-tx2
@@ -135,7 +151,7 @@ colcon build --symlink-install --packages-select orbslam3 \
     -DOpenCV_DIR="$OPENCV_INSTALL/lib/cmake/opencv4" \
     -DPangolin_DIR="$ORB_STACK/Pangolin/build" \
     -DORB_SLAM3_ROOT_DIR="$ORB_SLAM3_ROOT_DIR"
-source install/setup.bash
+source_ros2_setup
 
 echo "== 완료 =="
 ros2 doctor
