@@ -35,7 +35,18 @@ Foxy가 2020년 EOL되어 `rosdistro` 인덱스에서 완전히 빠지면서, `r
 - `CMakeModules/FindORB_SLAM3.cmake`: `ORB_SLAM3_ROOT_DIR` 기본값이 `~/Install/ORB_SLAM/ORB_SLAM3`로 하드코딩되어 있어, 환경변수/`-D` 오버라이드로 우리 경로(`/mnt/ssd/...`)를 쓸 수 있게 고쳤다.
 - `CMakeLists.txt`: (a) `/opt/ros/foxy` python3.8 경로를 하드코딩한 `PYTHONPATH` 설정을 제거 (우리는 python3.6/Bionic). (b) `include_directories`에 `${ORB_SLAM3_ROOT_DIR}/Thirdparty/Sophus`가 빠져 있어 `sophus/se3.hpp: No such file or directory`로 빌드가 실패했다 — 추가해서 해결.
 
+## 7. `scripts/setup_tx2.sh`를 처음부터 재검증하며 발견한 문제
+
+기존 빌드 결과물을 `*_verified_backup`으로 옮겨두고 스크립트를 진짜 빈 상태에서 다시 돌려봤다.
+
+- `set -u` 아래에서 `source install/setup.bash`가 `COLCON_TRACE: unbound variable`로 죽는 문제, 중단된 재실행 시 vcs import/Fast-DDS 수정/GUI 패키지 제거를 건너뛰는 문제, stale `CMakeCache.txt` 재사용 문제 — 이 세 가지는 `/code-review`로 찾아 PR에 반영했다 (자세한 내용은 PR 참고).
+- **`vcs import`가 `set -e` 아래에서 스크립트를 죽임**: `ros2.repos`가 여전히 `eProsima/Fast-DDS`를 존재하지 않는 `2.1.x` ref로 고정하고 있어서, `vcs import`는 (그 저장소 하나만 실패하고 나머지 98개는 정상 처리했는데도) 매번 0이 아닌 종료 코드를 반환한다. `set -e`가 이걸 치명적 에러로 취급해서, 바로 다음 줄에 있는 Fast-DDS `v2.1.4` 수정 코드가 실행되기도 전에 스크립트가 죽었다 — 에러 메시지도 전체 로그 중간(vcs import 자체 출력 안)에 묻혀 있어서 마치 원인 불명으로 조용히 멈춘 것처럼 보였다. `apt-get update`와 같은 패턴으로 `vcs import src < ros2.repos || true`로 고쳤다.
+
+이 수정 이후 `bash scripts/setup_tx2.sh`를 완전히 빈 상태에서 실행해 `EXIT_CODE=0`으로 끝까지 통과하는 것을 확인했다 (`ros2 doctor` — All 4 checks passed, `ros2 pkg executables orbslam3` → mono/rgbd/stereo/stereo-inertial).
+
 ## 결과
+
+`scripts/setup_tx2.sh`를 완전히 빈 상태(`*_verified_backup`)에서 처음부터 끝까지 재실행해 `EXIT_CODE=0`으로 검증 완료.
 
 - ROS2 Foxy: 237개 패키지 빌드 성공, `ros2 doctor` — All 4 checks passed
 - 공식 ORB-SLAM3(OpenCV 4.5.4 기준): 빌드 성공

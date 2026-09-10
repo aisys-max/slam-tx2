@@ -108,7 +108,10 @@ fi
 # (네트워크 오류 등으로) 중간에 끊기면 일부 저장소만 존재하는 상태가 되는데, 이 블록 전체를
 # "src/ros2 디렉터리가 있으면 건너뛴다"로 가드하면 Fast-DDS 브랜치 수정과 GUI/데모 패키지 제거까지
 # 함께 건너뛰어져 버린다.
-vcs import src < ros2.repos
+# ros2.repos가 여전히 eProsima/Fast-DDS를 존재하지 않는 "2.1.x" ref로 고정하고 있어서
+# (docs/tx2-build-notes.md #3) vcs import는 이 저장소 checkout에서 매번 0이 아닌 종료 코드를
+# 반환한다 — 이 한 저장소는 바로 다음 줄에서 v2.1.4로 직접 고정하므로 무해하다.
+vcs import src < ros2.repos || true
 # Foxy가 예전에 가리키던 Fast-DDS 의 "2.1.x" 브랜치가 업스트림에서 이름이 바뀌었다 (docs/tx2-build-notes.md)
 if [ -d src/eProsima/Fast-DDS ]; then
   (cd src/eProsima/Fast-DDS && git checkout v2.1.4)
