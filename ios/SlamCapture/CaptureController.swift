@@ -10,7 +10,7 @@ final class CaptureController: ObservableObject {
 
     private let server: TCPServer
     private lazy var captureManager = CaptureManager { [weak self] frameMessage in
-        self?.server.send(frameMessage)
+        self?.server.sendFrame(frameMessage)
         DispatchQueue.main.async { self?.framesSent += 1 }
     }
     private lazy var motionManager = MotionManager { [weak self] imuMessage in
