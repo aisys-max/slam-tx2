@@ -35,8 +35,11 @@ source_ros2_setup
 export ROS_PYTHON_VERSION=3
 
 BAG_DIR="$OUT_DIR/rosbag2"
-if [ ! -d "$BAG_DIR" ]; then
+# metadata.yaml은 euroc_to_rosbag2.py가 모든 메시지를 다 쓴 뒤 맨 마지막에 쓴다 — 이게 없으면
+# 이전 변환이 중간에 끊긴 것(디스크 꽉 참 등)이므로 디렉터리만 보고 건너뛰면 안 된다.
+if [ ! -f "$BAG_DIR/metadata.yaml" ]; then
   echo "== EuRoC -> rosbag2 변환 =="
+  rm -rf "$BAG_DIR"
   python3 "$REPO_DIR/scripts/euroc_to_rosbag2.py" "$MAV0_DIR" "$BAG_DIR"
 else
   echo "== rosbag2가 이미 있음, 변환 건너뜀: $BAG_DIR =="
