@@ -1,0 +1,29 @@
+name: SlamCapture
+options:
+  bundleIdPrefix: com.aisys-max
+  deploymentTarget:
+    iOS: "15.0"
+settings:
+  DEVELOPMENT_TEAM: "2AUUU6M9M6"
+targets:
+  SlamCapture:
+    type: application
+    platform: iOS
+    sources:
+      - path: SlamCapture
+        excludes:
+          - Info.plist
+    info:
+      path: Generated-Info.plist
+      properties:
+        UILaunchScreen: {}
+        NSCameraUsageDescription: SLAM 파이프라인용으로 카메라 프레임을 캡처해 TX2로 스트리밍합니다.
+        NSMotionUsageDescription: SLAM 파이프라인용으로 IMU(가속도계/자이로) 데이터를 캡처해 TX2로 스트리밍합니다.
+        UIRequiresFullScreen: true
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationLandscapeRight
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.aisys-max.SlamCapture
+        TARGETED_DEVICE_FAMILY: "1"
+        CODE_SIGN_STYLE: Automatic

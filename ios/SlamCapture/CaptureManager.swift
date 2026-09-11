@@ -39,7 +39,7 @@ final class CaptureManager: NSObject {
         session.beginConfiguration()
         session.sessionPreset = .vga640x480  // 스펙 640x480~752x480 범위 시작 값
 
-        guard let device = AVCaptureDevice.default(.builtinWideAngleCamera, for: .video, position: .back),
+        guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
               let input = try? AVCaptureDeviceInput(device: device),
               session.canAddInput(input) else {
             log.error("후면 카메라 입력 구성 실패")
