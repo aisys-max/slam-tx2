@@ -1,2 +1,6 @@
 __pycache__/
 *.pyc
+
+# xcodegen build outputs (regenerate with `xcodegen generate` in ios/, see ios/project.yml)
+ios/SlamCapture.xcodeproj/
+ios/Generated-Info.plist
