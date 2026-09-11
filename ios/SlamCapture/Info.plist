@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSCameraUsageDescription</key>
+	<string>SLAM 파이프라인용으로 카메라 프레임을 캡처해 TX2로 스트리밍합니다.</string>
+	<key>NSMotionUsageDescription</key>
+	<string>SLAM 파이프라인용으로 IMU(가속도계/자이로) 데이터를 캡처해 TX2로 스트리밍합니다.</string>
+	<key>UIRequiresFullScreen</key>
+	<true/>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+</dict>
+</plist>
