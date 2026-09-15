@@ -1,6 +1,10 @@
 __pycache__/
 *.pyc
 
+# raw calibration photos (#5) — bulky, reproducible via capture_calibration_images.py;
+# the resulting calibration/*.yaml is the committed deliverable, not the source images.
+calib_images/
+
 # xcodegen build outputs (regenerate with `xcodegen generate` in ios/, see ios/project.yml)
 ios/SlamCapture.xcodeproj/
 ios/Generated-Info.plist
