@@ -15,6 +15,7 @@
 파일 목록:
 - `SlamCaptureApp.swift` — 앱 진입점
 - `ContentView.swift` — 상태 표시 UI
+- `CameraPreviewView.swift` — 화면에 실제 카메라 프레임을 보여주는 라이브 프리뷰 (캘리브레이션(#5) 등 촬영 시 프레이밍 확인용)
 - `CaptureController.swift` — 카메라/IMU/TCP서버를 엮는 컨트롤러
 - `CaptureManager.swift` — 후면 카메라 캡처 (AVFoundation)
 - `MotionManager.swift` — IMU 캡처 (CoreMotion)

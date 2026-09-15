@@ -7,7 +7,7 @@ import os
 /// mono8은 캡처한 YUV420 버퍼의 Y-plane(휘도)을 그대로 쓴다 — 별도 그레이스케일
 /// 변환 없이 CPU 부담을 줄인다 (docs/ios-tcp-protocol.md).
 final class CaptureManager: NSObject {
-    private let session = AVCaptureSession()
+    let session = AVCaptureSession()
     private let videoOutputQueue = DispatchQueue(label: "com.slamtx2.videoOutput")
     private let log = Logger(subsystem: "com.slamtx2.slamcapture", category: "CaptureManager")
 
