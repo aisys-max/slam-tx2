@@ -16,7 +16,16 @@ import threading
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from ios_bridge_node import BridgeConnection, build_camera_info, build_image, build_imu, load_calibration  # noqa: E402
+import rclpy  # noqa: E402
+
+from ios_bridge_node import (  # noqa: E402
+    BridgeConnection,
+    _make_ros_logger,
+    build_camera_info,
+    build_image,
+    build_imu,
+    load_calibration,
+)
 from test_ios_tcp_client import encode_frame, encode_imu  # noqa: E402
 
 
@@ -108,6 +117,27 @@ def test_load_real_calibration_file():
     print("test_load_real_calibration_file 통과")
 
 
+def test_ros_logger_survives_alternating_severities():
+    """실기기에서 재현된 버그: node.get_logger()를 한 줄에서 getattr(logger, level)(msg)로
+    dispatch하면, rclpy가 호출부 줄 번호로 severity를 기억해뒀다가 같은 줄에서 severity가
+    바뀔 때(info -> error) ValueError('Logger severity cannot be changed between calls.')를
+    던진다. _make_ros_logger()는 레벨마다 다른 줄에서 호출해 이를 피해야 한다."""
+    rclpy.init()
+    try:
+        node = rclpy.create_node("test_ios_bridge_logger")
+        try:
+            log = _make_ros_logger(node)
+            log("info", "연결됨")
+            log("error", "연결 끊김: 테스트")  # 버그가 있었다면 여기서 ValueError
+            log("warning", "재연결 시도")
+            log("info", "연결됨")
+        finally:
+            node.destroy_node()
+    finally:
+        rclpy.shutdown()
+    print("test_ros_logger_survives_alternating_severities 통과")
+
+
 class FakeSocket:
     """recv()가 주어진 바이트 스트림을 순서대로 반환하다가 소진되면 지정한 예외를 던져
     실제 연결 끊김(ConnectionResetError 등)을 흉내낸다."""
@@ -197,6 +227,7 @@ def self_test():
     test_build_imu()
     test_load_calibration_rejects_malformed_yaml()
     test_load_real_calibration_file()
+    test_ros_logger_survives_alternating_severities()
     test_reconnect_and_resume()
     print("모든 테스트 통과")
     return 0

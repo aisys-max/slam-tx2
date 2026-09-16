@@ -220,6 +220,27 @@ class BridgeNode:
         self.imu_pub.publish(build_imu(imu))
 
 
+def _make_ros_logger(node: Node):
+    """BridgeConnection의 log(level, msg) 콜백을 node.get_logger()에 연결한다.
+
+    getattr(node.get_logger(), level)(msg) 한 줄로 dispatch하면 실제 실기기에서 크래시가 났다 -
+    rclpy 로거가 "몇 번째 줄에서 호출됐는지"로 severity를 기억해뒀다가, 같은 줄에서 severity가
+    바뀌면(예: 처음엔 info로 "연결됨", 나중엔 error로 "연결 끊김") ValueError를 던진다. 그래서
+    info/warning/error를 각각 다른 줄에서 호출해야 한다."""
+
+    def log(level, msg):
+        if level == "info":
+            node.get_logger().info(msg)
+        elif level == "warning":
+            node.get_logger().warning(msg)
+        elif level == "error":
+            node.get_logger().error(msg)
+        else:
+            node.get_logger().info(msg)
+
+    return log
+
+
 def run_node(host, port, calibration_path, connect_timeout, recv_timeout, retry_delay):
     calibration = load_calibration(calibration_path)
 
@@ -236,7 +257,7 @@ def run_node(host, port, calibration_path, connect_timeout, recv_timeout, retry_
         connect_timeout=connect_timeout,
         recv_timeout=recv_timeout,
         retry_delay=retry_delay,
-        log=lambda level, msg: getattr(node.get_logger(), level)(msg),
+        log=_make_ros_logger(node),
     )
     conn_thread = threading.Thread(target=connection.run, args=(stop_event,), daemon=True)
     conn_thread.start()
