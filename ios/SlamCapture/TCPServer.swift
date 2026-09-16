@@ -81,6 +81,12 @@ final class TCPServer {
         // 새 연결이 오면 이전 연결을 닫는다 (프로토콜 문서 참고).
         currentConnection?.cancel()
         currentConnection = connection
+        // 이전 연결에서 sendFrame()이 전송 중이었다면 cancel()로는 그 완료 콜백이 안 불릴 수 있어
+        // frameInFlight가 true로 영원히 고정되고, 그러면 이후 모든 sendFrame() 호출이 새 연결에서도
+        // 조용히 무시된다(IMU는 이 플래그를 안 써서 멀쩡히 나가는데 프레임만 하나도 안 나가는 것으로
+        // 관찰됨 - 재연결을 반복하며 실기기에서 재현). 새 연결을 받을 때마다 무조건 리셋한다 - 이전
+        // 연결로의 전송은 이미 의미가 없어졌으므로 완료 콜백을 기다릴 이유가 없다.
+        frameInFlight = false
 
         connection.stateUpdateHandler = { [weak self] state in
             guard let self = self else { return }

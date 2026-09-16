@@ -4,6 +4,42 @@ MVP(#1) 완성 기준: iPhone을 들고 실내를 걸으며 캡처 → 브리지
 publish까지 크래시 없이 동작하고, 같은 세션을 녹화/재생했을 때 SLAM 노드가 동등하게 동작하는지
 확인한다.
 
+## 진행 상황 (계속 진행 중 - 아직 완료 아님)
+
+첫 실기기 시도(2026-09-16)에서 라이브 세션 전체를 실제로 띄워보며 발견/수정한 것들, 시간 순:
+
+1. **iOS `TCPServer.swift`의 `frameInFlight` 백프레셔 플래그가 영원히 고정되는 버그.**
+   전송 중에 재연결이 오면 `frameInFlight`를 리셋할 방법이 없어서, 그 뒤로는 IMU만 나가고
+   프레임은 전혀 안 나간다. `accept()`에서 새 연결마다 리셋하도록 수정함 (이 저장소, 아직 커밋
+   안 했으면 다음 세션에서 커밋 - `ios/SlamCapture/TCPServer.swift`). **Xcode로 재빌드해서
+   iPhone에 다시 설치해야 반영된다.**
+2. **`monocular-inertial-slam-node.cpp`의 구독이 기본(reliable) QoS였다** — 브리지 노드는
+   계약대로 best-effort로 publish하니 아예 매칭이 안 돼서 라이브 캡처로는 이미지/IMU를 하나도
+   못 받고 있었다. `aisys-max/ORB_SLAM3_ROS2`에서 `rclcpp::QoS(depth).best_effort()`로 수정.
+   (#3 EuRoC 검증이 이 버그를 못 잡은 이유: `ros2 bag play`가 QoS 미지정 토픽을 기본 reliable로
+   재생해서 우연히 맞았을 뿐.)
+3. **`SyncWithImu()`가 처리할 게 없을 때 sleep 없이 busy-wait** — TX2 코어 하나를 100% 계속
+   태워서, 코어 4개뿐인 TX2에서 실제 콜백을 전달하는 executor 스레드와 CPU를 놓고 경쟁했다.
+   모든 "할 일 없음" 경로에 1ms sleep 추가.
+4. **아직 미해결**: 위 세 가지를 다 고친 뒤에도 `GrabImu`는 계속 호출되는데(~100Hz)
+   `GrabImage`는 단 한 번도 호출되지 않는다. `ros2 topic info`는 publisher/subscriber가
+   매칭됐다고 나오는데도 이미지만 전혀 전달이 안 된다. **현재 유력한 가설**: DDS(FastRTPS)
+   조각화(fragmentation) + best-effort 상호작용 — 640x480 mono8 프레임(~307KB)은 UDP 패킷
+   하나에 안 들어가 여러 조각으로 나뉘는데, best-effort는 조각 하나만 유실돼도 재전송 없이
+   샘플 전체를 버린다. IMU(72바이트, 조각 없음)는 멀쩡한 것과 정확히 일치. **다음에 시도해볼
+   것**:
+   - `/camera/image_raw`만 실험적으로 reliable로 바꿔서(계약 위반이지만 진단용) 진짜 원인인지
+     확인
+   - Fast-DDS의 UDP 최대 메시지 크기/전송 설정을 키워서 조각화 자체를 줄이거나 없애기
+   - 브리지 노드와 SLAM 노드가 같은 호스트(TX2)에 있으니 SHM(공유메모리) transport 사용 검토
+   - `aisys-max/ORB_SLAM3_ROS2`에 `[DEBUG]` 임시 로그(`GrabImu`/`GrabImage`/`SyncWithImu`)를
+     남겨뒀다 - 원인 찾으면 지울 것
+5. Wi-Fi 직결이 USB/iproxy보다 훨씬 빠르다는 것도 확인됨 (Frame ~21Hz vs ~5.9Hz, IMU ~90-99Hz
+   vs ~50-69Hz) - USB/iproxy 대역폭이 병목이었다는 뜻, #10에 기록함.
+
+**아직 궤적이 한 번도 안 만들어졌다** (`/camera/image_raw`가 전혀 안 오니 트래킹 시도 자체가 안
+됨) - 다음 세션은 4번 이어서 진행할 것.
+
 ## 이 문서를 쓰기 전에 알아야 할 것 (사전 조사 결과)
 
 - **SLAM 노드는 원래 실시간 궤적을 publish하지 않았다.** `KeyFrameTrajectory.txt` 파일만
