@@ -21,24 +21,26 @@ publish까지 크래시 없이 동작하고, 같은 세션을 녹화/재생했�
 3. **`SyncWithImu()`가 처리할 게 없을 때 sleep 없이 busy-wait** — TX2 코어 하나를 100% 계속
    태워서, 코어 4개뿐인 TX2에서 실제 콜백을 전달하는 executor 스레드와 CPU를 놓고 경쟁했다.
    모든 "할 일 없음" 경로에 1ms sleep 추가.
-4. **아직 미해결**: 위 세 가지를 다 고친 뒤에도 `GrabImu`는 계속 호출되는데(~100Hz)
-   `GrabImage`는 단 한 번도 호출되지 않는다. `ros2 topic info`는 publisher/subscriber가
-   매칭됐다고 나오는데도 이미지만 전혀 전달이 안 된다. **현재 유력한 가설**: DDS(FastRTPS)
-   조각화(fragmentation) + best-effort 상호작용 — 640x480 mono8 프레임(~307KB)은 UDP 패킷
-   하나에 안 들어가 여러 조각으로 나뉘는데, best-effort는 조각 하나만 유실돼도 재전송 없이
-   샘플 전체를 버린다. IMU(72바이트, 조각 없음)는 멀쩡한 것과 정확히 일치. **다음에 시도해볼
-   것**:
-   - `/camera/image_raw`만 실험적으로 reliable로 바꿔서(계약 위반이지만 진단용) 진짜 원인인지
-     확인
-   - Fast-DDS의 UDP 최대 메시지 크기/전송 설정을 키워서 조각화 자체를 줄이거나 없애기
-   - 브리지 노드와 SLAM 노드가 같은 호스트(TX2)에 있으니 SHM(공유메모리) transport 사용 검토
-   - `aisys-max/ORB_SLAM3_ROS2`에 `[DEBUG]` 임시 로그(`GrabImu`/`GrabImage`/`SyncWithImu`)를
-     남겨뒀다 - 원인 찾으면 지울 것
+4. **(2026-09-16 밤 기준 미해결이었던 것, 2026-09-17 아침에 원인 확정)**: 위 세 가지를 다
+   고친 뒤에도 `GrabImu`는 계속 호출되는데(~100Hz) `GrabImage`는 단 한 번도 호출되지 않았다.
+   당시 유력했던 가설은 DDS(FastRTPS) 조각화(fragmentation) + best-effort 상호작용이었다.
+   **이 가설은 틀렸다**: `/camera/image_raw` 발행(브리지 노드)/구독(SLAM 노드) 양쪽을 모두
+   임시로 reliable QoS로 바꿔 재빌드/재실행해도(진단용, 계약 위반) `GrabImage`는 여전히 0회.
+   reliable이면 DDS가 유실된 조각을 재전송하므로, 이래도 안 되면 조각화/QoS 문제가 아니라는
+   뜻 — 진단 후 두 파일 모두 best-effort로 원복하고 재빌드함.
+   **실제 원인**: 브리지 노드를 거치지 않고 `test_ios_tcp_client.py --connect`로 iPhone에
+   직접 붙어봐도 `Frame 0개, IMU 790개` — **iPhone 앱 자체가 프레임을 하나도 안 보내고
+   있었다.** 이는 1번의 `frameInFlight` 버그 그 자체다: 코드 수정은 저장소에 있지만, 어젯밤
+   앱은 재시작만 했을 뿐 Xcode로 재빌드/재설치를 안 해서, 밤새 재연결이 반복되는 사이 플래그가
+   다시 영원히 고정된 상태로 돌아간 것. **다음에 할 일은 진단이 아니라 배포**: Mac에서
+   `ios/SlamCapture`를 Xcode로 재빌드해서 iPhone에 다시 설치하는 것뿐이다.
+   `aisys-max/ORB_SLAM3_ROS2`에 남겨둔 `[DEBUG]` 임시 로그(`GrabImu`/`GrabImage`/
+   `SyncWithImu`)는 프레임이 실제로 들어오기 시작하는 걸 확인한 뒤 지운다.
 5. Wi-Fi 직결이 USB/iproxy보다 훨씬 빠르다는 것도 확인됨 (Frame ~21Hz vs ~5.9Hz, IMU ~90-99Hz
    vs ~50-69Hz) - USB/iproxy 대역폭이 병목이었다는 뜻, #10에 기록함.
 
 **아직 궤적이 한 번도 안 만들어졌다** (`/camera/image_raw`가 전혀 안 오니 트래킹 시도 자체가 안
-됨) - 다음 세션은 4번 이어서 진행할 것.
+됨) - 원인은 확정됐으니, 다음 세션은 iPhone 앱을 Xcode로 재빌드/재설치하는 것부터 시작한다.
 
 ## 이 문서를 쓰기 전에 알아야 할 것 (사전 조사 결과)
 
