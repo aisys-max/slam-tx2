@@ -4,9 +4,9 @@ MVP(#1) 완성 기준: iPhone을 들고 실내를 걸으며 캡처 → 브리지
 publish까지 크래시 없이 동작하고, 같은 세션을 녹화/재생했을 때 SLAM 노드가 동등하게 동작하는지
 확인한다.
 
-## 진행 상황 (계속 진행 중 - 아직 완료 아님)
+## 진행 상황 (2026-09-17 완료)
 
-첫 실기기 시도(2026-09-16)에서 라이브 세션 전체를 실제로 띄워보며 발견/수정한 것들, 시간 순:
+첫 실기기 시도(2026-09-16~17)에서 라이브 세션 전체를 실제로 띄워보며 발견/수정한 것들, 시간 순:
 
 1. **iOS `TCPServer.swift`의 `frameInFlight` 백프레셔 플래그가 영원히 고정되는 버그.**
    전송 중에 재연결이 오면 `frameInFlight`를 리셋할 방법이 없어서, 그 뒤로는 IMU만 나가고
@@ -38,9 +38,43 @@ publish까지 크래시 없이 동작하고, 같은 세션을 녹화/재생했�
    `SyncWithImu`)는 프레임이 실제로 들어오기 시작하는 걸 확인한 뒤 지운다.
 5. Wi-Fi 직결이 USB/iproxy보다 훨씬 빠르다는 것도 확인됨 (Frame ~21Hz vs ~5.9Hz, IMU ~90-99Hz
    vs ~50-69Hz) - USB/iproxy 대역폭이 병목이었다는 뜻, #10에 기록함.
+6. **PR #14의 iOS 재빌드/재설치 후**: 직접 연결로 `Frame 222개(27.6Hz), IMU 785개(97.8Hz)`
+   확인 → 브리지 노드 → SLAM 노드까지 `GrabImage`가 정상 호출됨. 이후 RViz2에서 "Path 추가한
+   줄 알았는데 실제로는 안 붙어 있던" 실수가 한 번 더 있었다 - `ros2 topic info
+   /orb_slam3/trajectory --verbose`로 `Subscription count: 0`을 보고서야 확인함. RViz Path
+   디스플레이가 목록에 있어 보여도 Topic 필드가 실제로 안 붙어있을 수 있으니, 안 그려지면
+   이 명령으로 구독자 수부터 확인할 것.
+7. **순수 회전(제자리 돌기)은 단안 SLAM에 최악의 입력이다** - 평행 이동(parallax)이 없어
+   삼각측량이 안 되고 트래킹이 계속 유실/재초기화된다. 사각형으로 걷는 등 이동이 있는 경로로
+   바꾸니 초기화가 되긴 했지만, 이번엔 `Not enough motion for initializing. Reseting...` /
+   `TRACK: Reset map because local mapper set the bad imu flag`로 자주 리셋됨 - `Tbc`가
+   단위행렬 근사치이고 IMU 노이즈가 iPhone 실측이 아닌 EuRoC 기본값이라 VIO 초기화 일관성
+   검증이 자주 실패하는 것으로 보인다 (실측 캘리브레이션 없이는 근본적으로 해결이 어려운,
+   이미 알려진 MVP 범위 밖 근사치의 결과 - config/monocular-inertial/iPhoneXsMax.yaml 참고).
+8. **`KeyFrameTrajectory.txt`가 또 비어 있었다** - 이번엔 다른 이유: 종료 시점에 하필 맵이 막
+   리셋된 직후라 "현재 활성 맵"이 비어 있었다 (`SaveKeyFrameTrajectoryTUM`은 atlas 전체가 아니라
+   종료 시점 활성 맵만 저장). `/orb_slam3/trajectory`(pathMsg_)는 맵 리셋과 무관하게 계속
+   누적되는 값이라 이 문제를 겪지 않으므로, `scripts/record_trajectory_tum.py`를 새로 만들어
+   이 토픽을 실시간으로 TUM 포맷 파일에 계속 흘려 쓰도록 했다 (Ctrl+C로 죽여도 그 시점까지의
+   전체 궤적이 남는다). 라이브/재생 양쪽에 이 recorder를 붙여서 재검증함.
 
-**아직 궤적이 한 번도 안 만들어졌다** (`/camera/image_raw`가 전혀 안 오니 트래킹 시도 자체가 안
-됨) - 원인은 확정됐으니, 다음 세션은 iPhone 앱을 Xcode로 재빌드/재설치하는 것부터 시작한다.
+## 결과 (2026-09-17)
+
+recorder를 붙인 상태로 라이브 세션(사각형 walk)과 그 bag 재생을 각각 실행해 비교:
+
+```
+매칭된 포즈: 55개 (재생 궤적 121개 / 라이브 궤적 158개 중, --max-diff 0.1s)
+ATE RMSE:   0.1773 m
+ATE mean:   0.1298 m
+ATE median: 0.0847 m
+ATE max:    0.6604 m
+```
+
+트래킹이 자주 리셋되는 상태에서도 크래시 없이 캡처→브리지→SLAM→궤적 publish→bag 녹화→재생
+전체 파이프라인이 끝까지 동작했고, 라이브/재생 궤적이 발산하지 않고 같은 범위 안에서 비슷한
+형태를 보인다. **#7의 완료 기준(크래시 없는 동작 + 녹화/재생 동등성 확인)을 충족한다고 판단**.
+트래킹 안정성 자체(맵 리셋 빈도)는 `Tbc`/IMU 노이즈 실측 캘리브레이션이 없는 한 근본적으로
+개선하기 어려운, MVP 범위 밖 항목으로 남겨둔다.
 
 ## 이 문서를 쓰기 전에 알아야 할 것 (사전 조사 결과)
 
@@ -101,8 +135,7 @@ python3 scripts/ios_bridge_node.py localhost 8765
 `연결됨` 로그와 `docs/bridge-node.md`의 검증 절차(`ros2 topic hz` 등)로 데이터가 오는지 먼저
 확인할 것.
 
-**터미널 D** — SLAM 노드. 작업 디렉터리에 `KeyFrameTrajectory.txt`가 저장되므로 세션마다
-새 디렉터리에서 실행:
+**터미널 D** — SLAM 노드. 세션마다 새 디렉터리에서 실행:
 ```bash
 source /mnt/ssd/ros2_foxy/install/setup.bash
 mkdir -p /mnt/ssd/live_e2e/live_run && cd /mnt/ssd/live_e2e/live_run
@@ -112,6 +145,14 @@ ros2 run orbslam3 mono-inertial \
 ```
 어휘(vocabulary, 145MB) 로딩에 시간이 걸린다 — "There are 1 cameras" 같은 로그가 뜰 때까지
 기다린 뒤 다음 단계로.
+
+**터미널 F** — 궤적 recorder (SLAM 노드가 뜬 뒤 시작; 왜 필요한지는 아래 8번 참고):
+```bash
+source /mnt/ssd/ros2_foxy/install/setup.bash
+python3 scripts/record_trajectory_tum.py /mnt/ssd/live_e2e/live_run/trajectory.tum
+```
+`KeyFrameTrajectory.txt`(종료 시점 스냅샷)에 의존하지 말고 이 recorder가 만드는
+`trajectory.tum`을 라이브 궤적의 정본으로 쓴다 - 트래킹이 중간에 리셋돼도 누락 없이 남는다.
 
 ## 2. 녹화 시작 + 걷기
 
@@ -130,12 +171,14 @@ ros2 bag record /camera/image_raw /camera/camera_info /imu -o indoor_walk_bag
 
 다 걸었으면:
 1. 터미널 E에서 Ctrl+C로 녹화 종료
-2. 터미널 D에서 Ctrl+C로 SLAM 노드 종료 (종료 시 `live_run/KeyFrameTrajectory.txt` 저장됨)
-3. 터미널 C(브리지 노드), B(iproxy)도 정리
+2. 터미널 F(recorder)에서 Ctrl+C로 종료 (`live_run/trajectory.tum` 최종 저장됨)
+3. 터미널 D에서 Ctrl+C로 SLAM 노드 종료
+4. 터미널 C(브리지 노드), B(iproxy)도 정리
 
 ## 3. 재생 검증
 
-새 SLAM 노드를 다른 디렉터리에서 띄운 뒤 (브리지 노드/iPhone 없이, bag만으로):
+새 SLAM 노드를 다른 디렉터리에서 띄운 뒤 (브리지 노드/iPhone 없이, bag만으로), 여기에도
+recorder를 붙인다:
 
 ```bash
 source /mnt/ssd/ros2_foxy/install/setup.bash
@@ -145,29 +188,38 @@ ros2 run orbslam3 mono-inertial \
   /mnt/ssd/ros2_foxy/src/slam-tx2/orbslam3/config/monocular-inertial/iPhoneXsMax.yaml
 ```
 
-로딩 끝난 뒤 다른 터미널에서:
+로딩 끝난 뒤 다른 터미널에서 recorder를 먼저 시작하고:
+```bash
+source /mnt/ssd/ros2_foxy/install/setup.bash
+python3 scripts/record_trajectory_tum.py /mnt/ssd/live_e2e/replay_run/trajectory.tum
+```
+그 다음 bag을 재생한다:
 ```bash
 source /mnt/ssd/ros2_foxy/install/setup.bash
 ros2 bag play /mnt/ssd/live_e2e/indoor_walk_bag
 ```
 (RViz2를 계속 띄워두면 재생 중에도 Path가 그려지는 걸 볼 수 있다.)
 
-재생이 끝나면 SLAM 노드를 Ctrl+C로 종료 (`replay_run/KeyFrameTrajectory.txt` 저장됨).
+재생이 끝나면 recorder를 Ctrl+C로 종료(`replay_run/trajectory.tum` 최종 저장됨), 그 다음
+SLAM 노드도 종료.
 
 ## 4. 라이브 vs 재생 비교
 
 `scripts/evaluate_ate.py`(#3에서 만든 TUM 궤적 비교 도구, groundtruth 전용이 아니라 임의의 두
-TUM 궤적을 비교하는 범용 도구)를 그대로 재사용한다 — 라이브 궤적을 "추정치", 재생 궤적을
-"참조"로 놓고 둘 사이의 정합 오차(ATE)를 계산:
+TUM 궤적을 비교하는 범용 도구)를 그대로 재사용한다 — 재생 궤적을 "추정치", 라이브 궤적을
+"참조"로 놓고 둘 사이의 정합 오차(ATE)를 계산 (recorder가 쓰는 `trajectory.tum`을 사용 -
+`KeyFrameTrajectory.txt`는 맵 리셋 타이밍에 따라 종료 시점 스냅샷이 비어 있을 수 있어 쓰지
+않는다):
 
 ```bash
 python3 scripts/evaluate_ate.py \
-  /mnt/ssd/live_e2e/live_run/KeyFrameTrajectory.txt \
-  /mnt/ssd/live_e2e/replay_run/KeyFrameTrajectory.txt
+  /mnt/ssd/live_e2e/replay_run/trajectory.tum \
+  /mnt/ssd/live_e2e/live_run/trajectory.tum \
+  --max-diff 0.1
 ```
 
 결과 기록에 남길 것:
-- 라이브/재생 둘 다 크래시 없이 끝났는지, `KeyFrameTrajectory.txt`가 둘 다 생성됐는지
+- 라이브/재생 둘 다 크래시 없이 끝났는지, `trajectory.tum`이 둘 다 비어있지 않은지
 - 둘의 ATE (완전히 같을 필요는 없다 — IMU 초기화 타이밍이나 트래킹 유실/재초기화 시점이 조금만
   달라도 값이 벌어질 수 있다. 다만 자릿수가 크게 다르면(예: 한쪽만 수십 cm 이상 어긋남) 라이브
   경로와 재생 경로가 실제로 다르게 동작했다는 뜻이니 원인을 봐야 한다)
