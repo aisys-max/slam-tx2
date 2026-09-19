@@ -32,27 +32,30 @@ publish하던 것 — `aisys-max/ORB_SLAM3_ROS2@6b6b24e`에서 리셋 시 궤적
 
 캘리브레이션 후에도 리셋 빈도는 개선됐을 뿐(초당 ~1회 → ~17초당 1회) 완전히 해소되지
 않았고, 남은 병목은 아래 [#10](https://github.com/aisys-max/slam-tx2/issues/10)으로
-이관됨 — 프레임레이트가 여전히 낮아(~5.8Hz) `Fail to track local map!`가 반복 관찰됨.
+이관됐다 — 프레임레이트가 여전히 낮아(~5.8Hz) `Fail to track local map!`가 반복 관찰됨.
 
-**열린 이슈**: [#10](https://github.com/aisys-max/slam-tx2/issues/10) — TX2 실시간(20Hz)
-mono-inertial 처리 성능 격차. `bug`+`ready-for-agent`로 트리아지 완료(2026-09-19), agent
-brief가 이슈에 등록돼 있음. MVP 스펙(#1)의 Out of Scope에 명시된 "실시간 성능 최적화" 항목이라
-MVP 완료를 막지 않았지만, #15의 남은 트래킹 불안정 문제가 사실상 이 이슈에 달려 있어 실사용을
-위해선 다음으로 다뤄야 한다.
+**[#10](https://github.com/aisys-max/slam-tx2/issues/10) 수정 및 실기기 검증 완료
+(2026-09-19)** — 병목은 네트워크 전송이 아니라 브리지 노드 자체의 CPU-bound 처리였다. 근본
+원인: rosidl이 생성한 `sensor_msgs/Image`의 `data` setter(`_image.py`)가, 대입되는 값이
+`array.array`가 아니면 배열 전체를 파이썬 레벨로 원소별 `isinstance`/범위 검증한다 —
+640x480 프레임(307,200바이트) 기준 ~157ms/frame(이 필드 하나만으로 상한 ~6.4Hz), 실측
+~5.8Hz와 거의 정확히 일치했다. [`build_image()`](../scripts/ios_bridge_node.py)가 기존엔
+`frame["pixels"]`(`bytes`)를 그대로 대입해 매 프레임 이 느린 경로를 탔는데,
+`array.array("B", ...)`로 미리 감싸 대입하면 setter의 fast path(`isinstance(value,
+array.array)`)를 타게 된다. iPhone에 Wi-Fi 직결로 라이브 검증: `/camera/image_raw`가
+~5.8Hz → **~27.3Hz**로, 브리지 노드 CPU가 95~100% → **~13~16%**로 개선됐고, `/imu`도
+(불균일하던 50~69Hz → ~97Hz로) 회귀 없이 함께 좋아졌다.
 
 ## 다음에 할 만한 일
 
-1. **#10 성능 격차 (최우선, ready-for-agent)** — 기존 가설("USB/iproxy 대역폭이 병목")이
-   2026-09-19 재검증으로 흔들렸다: Wi-Fi 직결로도 브리지 노드를 거치면 여전히 ~1.27~5.8Hz에
-   그치고 브리지 노드 프로세스가 CPU 95~100%를 점유하는 반면, 브리지 노드 없이 순수 소켓으로
-   직접 붙은 과거 테스트(`test_ios_tcp_client.py --connect`)는 27.6Hz를 냈다 — **네트워크
-   전송이 아니라 브리지 노드 자체(rclpy publish 경로 등)가 CPU-bound 병목일 가능성**이 새
-   유력 후보. 상세 내용과 agent brief는 [#10 코멘트](https://github.com/aisys-max/slam-tx2/issues/10)
-   참고.
+1. **#10 수정 후 전체 라이브 SLAM 세션 재검증** — #15의 남은 트래킹 불안정(리셋,
+   `Fail to track local map!`)이 브리지 노드 프레임레이트에 달려 있다는 가설이 있었다.
+   `/camera/image_raw`가 이제 목표치(20~30Hz)에 근접하므로, [README.md](../README.md)의
+   RViz 라이브 확인 절차를 다시 돌려서 이 불안정이 얼마나 해소됐는지 확인할 가치가 있다.
 2. **차량 실측 / 17 Pro Max + LiDAR 확장** — #1 스펙의 Out of Scope에 명시된 다음 단계.
    토픽 기반 구조라 `sensor_msgs/PointCloud2` 추가만으로 확장 가능하도록 설계되어 있다
-   (설계 의도만 있고 구현은 없음). #10이 해결돼 트래킹이 안정화된 뒤 진행하는 게 순서상
-   맞을 것.
+   (설계 의도만 있고 구현은 없음). #10 수정 후 트래킹이 안정적임을 확인한 뒤 진행하는 게
+   순서상 맞을 것.
 
 ## 라이브 세션을 다시 돌리려면
 
@@ -85,10 +88,13 @@ MVP 완료를 막지 않았지만, #15의 남은 트래킹 불안정 문제가 �
    ```bash
    set +u; source /mnt/ssd/ros2_foxy/install/setup.bash; set -u
    ```
-9. **`ios_bridge_node.py`가 CPU 한 코어를 거의 독점하면서 프레임레이트가 뚝 떨어질 수 있다**
-   (2026-09-19 관찰: ~1.27Hz까지 떨어짐). 브리지 노드를 재시작하면 일시적으로 나아지기도
-   하지만(~5.8Hz), 근본 원인은 아직 안 고쳐졌다 — [#10](https://github.com/aisys-max/slam-tx2/issues/10)
-   참고. `ros2 topic hz`는 best-effort 발행자와 QoS가 안 맞아 빈 값만 나올 수 있으니, 실제
+9. **(2026-09-19 수정됨, [#10](https://github.com/aisys-max/slam-tx2/issues/10)) 예전엔
+   `ios_bridge_node.py`가 CPU 한 코어를 거의 독점하면서 프레임레이트가 뚝 떨어졌다**
+   (~1.27Hz까지 관찰). 원인은 `sensor_msgs/Image.data`의 생성된 setter가 매 프레임 파이썬
+   레벨로 원소별 타입 검증을 하던 것 — 대입값을 `array.array("B", ...)`로 감싸 수정.
+   브리지 노드가 다시 한 코어를 독점하는 걸 보면, 전송/USB 문제로 넘겨짚기 전에 여기부터
+   회귀했는지 확인할 것.
+10. **`ros2 topic hz`는 best-effort 발행자와 QoS가 안 맞아 빈 값만 나올 수 있다.** 실제
    프레임레이트 확인은 `--qos-reliability`류 옵션이 없는 ROS2 Foxy에서는 별도 rclpy
    스크립트(best-effort QoS로 직접 구독)로 잴 것.
 
