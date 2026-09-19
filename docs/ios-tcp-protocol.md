@@ -1,41 +1,47 @@
-# iPhone → TX2 USB 스트리밍 와이어 프로토콜 (#4)
+# iPhone → TX2 USB streaming wire protocol (#4)
 
-iOS 캡처 앱이 TCP 서버로 동작하고(고정 포트 **8765**), TX2 쪽 브리지 노드(#6)가 iproxy로 터널링된 이 포트에 클라이언트로 접속한다 (스펙 Implementation Decisions 참고). 이 문서가 그 사이의 바이트 단위 계약이다.
+> 한국어 버전은 [여기](ios-tcp-protocol.ko.md)에 있습니다.
 
-이 구간(iPhone↔TX2)만 커스텀 바이너리를 쓴다 — ROS2 토픽으로 변환되는 건 브리지 노드 **이후**부터다 ([docs/ros2-topic-contract.md](ros2-topic-contract.md)).
+The iOS capture app acts as a TCP server (fixed port **8765**), and the TX2-side bridge node
+(#6) connects as a client to this port tunneled via iproxy (see the spec's Implementation
+Decisions). This document is the byte-level contract between them.
 
-## 프레이밍
+Only this segment (iPhone↔TX2) uses a custom binary format — conversion into ROS2 topics only
+happens **after** the bridge node ([docs/ros2-topic-contract.md](ros2-topic-contract.md)).
 
-모든 정수/실수 필드는 **빅엔디안(network byte order)**. 각 메시지:
+## Framing
+
+Every integer/float field is **big-endian (network byte order)**. Each message:
 
 ```
 [1 byte  type]
-[4 bytes payload_length]   (uint32, big-endian, payload 바이트 수)
-[payload_length 바이트]
+[4 bytes payload_length]   (uint32, big-endian, number of payload bytes)
+[payload_length bytes]
 ```
 
 `type`:
-| 값 | 의미 |
+| Value | Meaning |
 |---|---|
-| `0x01` | Frame (카메라 이미지) |
-| `0x02` | IMU 샘플 |
+| `0x01` | Frame (camera image) |
+| `0x02` | IMU sample |
 
 ## Frame (`type = 0x01`) payload
 
 ```
-[8 bytes timestamp_ns]  (uint64, 캡처 시각 — iPhone 모노토닉 클럭, 나노초. ADR-0001)
+[8 bytes timestamp_ns]  (uint64, capture time — iPhone monotonic clock, nanoseconds. ADR-0001)
 [4 bytes width]         (uint32)
 [4 bytes height]        (uint32)
-[4 bytes stride]        (uint32, 한 행의 바이트 수 — mono8이므로 보통 width와 같음)
-[width*height 바이트]    (mono8 그레이스케일, row-major, 패딩 없음 — stride만큼 건너뛰며 읽을 것)
+[4 bytes stride]        (uint32, bytes per row — usually equal to width since it's mono8)
+[width*height bytes]    (mono8 grayscale, row-major, no padding — read by skipping `stride` bytes per row)
 ```
 
-인코딩은 항상 **mono8**이다 (YUV420 캡처의 Y-plane을 그대로 사용 — `docs/ios-app-setup.md` 참고). 색상은 보내지 않는다.
+Encoding is always **mono8** (the Y-plane of a YUV420 capture, used as-is — see
+`docs/ios-app-setup.md`). No color is sent.
 
-## IMU 샘플 (`type = 0x02`) payload
+## IMU sample (`type = 0x02`) payload
 
 ```
-[8 bytes timestamp_ns]        (uint64, 캡처 시각 — 프레임과 동일한 클럭 기준)
+[8 bytes timestamp_ns]        (uint64, capture time — same clock basis as frames)
 [8 bytes angular_velocity_x]  (float64, rad/s)
 [8 bytes angular_velocity_y]  (float64, rad/s)
 [8 bytes angular_velocity_z]  (float64, rad/s)
@@ -44,17 +50,26 @@ iOS 캡처 앱이 TCP 서버로 동작하고(고정 포트 **8765**), TX2 쪽 �
 [8 bytes linear_acceleration_z] (float64, m/s^2)
 ```
 
-CoreMotion은 가속도를 G 단위로 주므로 **9.80665를 곱해 m/s^2로 변환한 뒤** 보낸다 (`MotionManager.swift` 참고).
+CoreMotion reports acceleration in G units, so it's sent **after multiplying by 9.80665 to
+convert to m/s^2** (see `MotionManager.swift`).
 
-## 연결/생명주기
+## Connection/lifecycle
 
-- 앱은 시작하자마자 포트 8765에서 리스닝을 시작한다 (iPhone = TCP 서버, TX2 = 클라이언트 — 스펙 결정 사항).
-- 한 번에 하나의 클라이언트만 지원한다. 새 연결이 들어오면 이전 연결을 닫는다.
-- 프레임/IMU 순서는 캡처된 순서 그대로 보낸다(재정렬 없음) — 타임스탬프로 정렬/동기화하는 건 받는 쪽(브리지 노드)의 책임이다.
-- 연결이 끊기면 앱은 리스닝 상태로 돌아가 재연결을 받는다. 별도 재연결 프로토콜(재전송, ack 등)은 없다 — 끊긴 동안의 데이터는 유실된다.
+- The app starts listening on port 8765 as soon as it launches (iPhone = TCP server, TX2 =
+  client — a spec decision).
+- Only one client is supported at a time. A new connection closes the previous one.
+- Frames/IMU samples are sent in the order they were captured (no reordering) — sorting/syncing
+  by timestamp is the receiving side's (bridge node's) responsibility.
+- If the connection drops, the app returns to listening and accepts reconnects. There's no
+  separate reconnection protocol (retransmission, ack, etc.) — data lost during the disconnect
+  is gone for good.
 
-## 테스트
+## Testing
 
-`scripts/test_ios_tcp_client.py`가 이 프로토콜을 구현한 참조 클라이언트 겸 자체 테스트다:
-- `--self-test`: 실제 iPhone 없이, 이 문서의 바이트 레이아웃대로 합성 프레임/IMU 메시지를 만들어 파서가 왕복(인코딩→디코딩) 정확히 읽어내는지 확인한다.
-- `--connect <iPhone IP> 8765`: 실제 iPhone 앱에 접속해 받은 프레임/IMU 개수, 포맷, 타임스탬프 단조증가 여부를 출력한다 (#4의 "테스트 클라이언트로 검증 가능" 기준).
+`scripts/test_ios_tcp_client.py` is a reference client implementing this protocol, doubling as
+a self-test:
+- `--self-test`: without a real iPhone, builds synthetic frame/IMU messages per this document's
+  byte layout and confirms the parser round-trips them (encode→decode) correctly.
+- `--connect <iPhone IP> 8765`: connects to the real iPhone app and prints the count, format, and
+  monotonic-timestamp check of received frames/IMU samples (the "verifiable with a test client"
+  criterion from #4).
