@@ -1,29 +1,44 @@
 # SLAM Pipeline
 
-iPhone 카메라+IMU 데이터를 Jetson TX2에서 ROS2(Foxy)로 처리해 궤적/지도를 생성하는 SLAM 시스템의 도메인 용어집.
+> 한국어 버전은 [여기](CONTEXT.ko.md)에 있습니다.
+
+A domain glossary for the SLAM system that processes iPhone camera+IMU data on a Jetson TX2 via
+ROS2 (Foxy) to produce a trajectory/map.
 
 ## Language
 
-**세션 (Session)**:
-프로젝트 표준 센서 토픽(`sensor_msgs/Image`, `sensor_msgs/Imu`, `sensor_msgs/CameraInfo`)의 시간에 따른 흐름. rosbag2로 녹화된 형태든 실시간 토픽 스트림이든 동일한 토픽 규약을 쓰므로 서로 구분 없이 대체 가능하다.
-_Avoid_: 레코딩, 데이터셋, 캡처(캡처는 세션을 만드는 행위를 가리킬 때만 사용), 어댑터/파일 어댑터/라이브 어댑터(더 이상 쓰지 않음 — 세션은 커스텀 레이어 없이 ROS2 토픽 자체로 표현된다)
+**Session**:
+A flow, over time, of the project's standard sensor topics (`sensor_msgs/Image`,
+`sensor_msgs/Imu`, `sensor_msgs/CameraInfo`). Whether it's recorded with rosbag2 or a live topic
+stream, both use the same topic convention, so they're interchangeable.
+_Avoid_: recording, dataset, capture (use "capture" only for the act of creating a Session),
+adapter/file adapter/live adapter (no longer used — a Session is expressed as the ROS2 topics
+themselves, with no custom layer)
 
-**프레임 (Frame)**:
-세션 안의 `sensor_msgs/Image` 메시지 한 개. 같은 타임스탬프/frame_id로 짝지어진 `sensor_msgs/CameraInfo`가 캘리브레이션 메타데이터를 함께 실어 나른다.
-_Avoid_: 이미지, 샷
+**Frame**:
+One `sensor_msgs/Image` message within a Session. The `sensor_msgs/CameraInfo` paired by the
+same timestamp/frame_id carries the calibration metadata alongside it.
+_Avoid_: image, shot
 
-**IMU 샘플 (IMU Sample)**:
-세션 안의 `sensor_msgs/Imu` 메시지 한 개.
-_Avoid_: IMU 데이터, 센서값
+**IMU Sample**:
+One `sensor_msgs/Imu` message within a Session.
+_Avoid_: IMU data, sensor value
 
-**브리지 노드 (Bridge Node)**:
-iPhone에서 USB(iproxy 터널)로 들어오는 원시 스트림을 읽어 프로젝트 표준 센서 토픽으로 publish하는 ROS2 노드. 실제 카메라/IMU 드라이버 노드와 동등한 역할을 한다 — 이 노드 하나만 iPhone과의 USB 통신을 알고, 그 아래(SLAM 노드 등)는 토픽만 본다.
-_Avoid_: 라이브 어댑터, 커넥터
+**Bridge Node**:
+A ROS2 node that reads the raw stream coming in over USB (iproxy tunnel) from the iPhone and
+publishes it as the project's standard sensor topics. It plays the same role as a real
+camera/IMU driver node — only this one node knows about USB communication with the iPhone;
+everything below it (the SLAM node, etc.) only ever sees topics.
+_Avoid_: live adapter, connector
 
-**SLAM 노드 (SLAM Node)**:
-프로젝트 표준 센서 토픽을 구독해 ORB-SLAM3(visual-inertial)를 실행하고 궤적을 publish하는 ROS2 노드. 토픽이 브리지 노드(라이브)에서 오든 `ros2 bag play`(녹화본 재생)에서 오든 동일하게 동작한다.
-_Avoid_: 재생 파이프라인(어댑터 레이어가 있던 이전 설계 용어, 더 이상 쓰지 않음), SLAM 파이프라인 단독 사용
+**SLAM Node**:
+A ROS2 node that subscribes to the project's standard sensor topics, runs ORB-SLAM3
+(visual-inertial), and publishes the trajectory. It behaves identically whether the topics come
+from the Bridge Node (live) or from `ros2 bag play` (recorded replay).
+_Avoid_: replay pipeline (an older design term from when there was an adapter layer, no longer
+used), "SLAM pipeline" used alone
 
-**궤적 (Trajectory)**:
-SLAM 노드가 세션에 대해 publish하는, 시간에 따른 추정 카메라 포즈의 연속. ROS2 토픽(예: `nav_msgs/Path`)으로 표현된다.
-_Avoid_: 경로, 결과
+**Trajectory**:
+The sequence of estimated camera poses over time that the SLAM Node publishes for a Session.
+Represented as a ROS2 topic (e.g. `nav_msgs/Path`).
+_Avoid_: path, result

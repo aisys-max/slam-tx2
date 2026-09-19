@@ -1,117 +1,127 @@
 # slam-tx2
 
-iPhone 카메라+IMU → Jetson TX2 → ORB-SLAM3(mono-inertial) → RViz2. 용어는 [CONTEXT.md](CONTEXT.md),
-현재 상태/다음 할 일은 [docs/handoff.md](docs/handoff.md) 참고. 이 문서는 **라이브 세션을 RViz2로
-보는 절차 하나만**, 노드/스크립트 연결 관계와 함께 재현 가능하게 정리한 것이다.
+> 한국어 버전은 [여기](README.ko.md)에 있습니다.
 
-## 노드/토픽 연결 관계
+iPhone camera+IMU → Jetson TX2 → ORB-SLAM3 (mono-inertial) → RViz2. Terms are in
+[CONTEXT.md](CONTEXT.md), current status/next steps in [docs/handoff.md](docs/handoff.md). This
+doc covers **just one thing — watching a live session in RViz2** — laid out reproducibly along
+with how the nodes/scripts connect.
+
+## Node/topic wiring
 
 ```mermaid
 flowchart LR
-    iPhone["iPhone Xs Max<br/>SlamCapture 앱<br/>(ios/)"]
-    Bridge["브리지 노드<br/>scripts/ios_bridge_node.py"]
-    SLAM["SLAM 노드<br/>mono-inertial<br/>(별도 repo: ORB_SLAM3_ROS2)"]
+    iPhone["iPhone Xs Max<br/>SlamCapture app<br/>(ios/)"]
+    Bridge["Bridge node<br/>scripts/ios_bridge_node.py"]
+    SLAM["SLAM node<br/>mono-inertial<br/>(separate repo: ORB_SLAM3_ROS2)"]
     RViz["RViz2"]
-    Recorder["scripts/record_trajectory_tum.py<br/>(trajectory.tum 파일로 저장)"]
-    Bag["ros2 bag record/play<br/>(라이브 대신 재생 검증용)"]
+    Recorder["scripts/record_trajectory_tum.py<br/>(saves to trajectory.tum)"]
+    Bag["ros2 bag record/play<br/>(for replay validation instead of live)"]
 
-    iPhone -- "TCP (Wi-Fi 또는 USB/iproxy)<br/>docs/ios-tcp-protocol.md" --> Bridge
+    iPhone -- "TCP (Wi-Fi or USB/iproxy)<br/>docs/ios-tcp-protocol.md" --> Bridge
     Bridge -- "/camera/image_raw, /camera/camera_info, /imu<br/>(best-effort QoS)" --> SLAM
-    Bag -. "재생 시 브리지 대신<br/>같은 토픽 publish" .-> SLAM
+    Bag -. "publishes the same topics<br/>instead of the bridge, during replay" .-> SLAM
     SLAM -- "/orb_slam3/trajectory<br/>(nav_msgs/Path, reliable QoS)" --> RViz
     SLAM -- "/orb_slam3/trajectory" --> Recorder
 ```
 
-- 토픽 이름/타입/QoS 계약: [docs/ros2-topic-contract.md](docs/ros2-topic-contract.md)
-- 브리지 노드 상세: [docs/bridge-node.md](docs/bridge-node.md)
-- iPhone↔TX2 와이어 프로토콜: [docs/ios-tcp-protocol.md](docs/ios-tcp-protocol.md)
-- SLAM 노드(mono-inertial) C++ 소스는 이 저장소가 아니라 별도 repo
-  `aisys-max/ORB_SLAM3_ROS2`에 있다 (클론 위치 `/mnt/ssd/ros2_foxy/src/slam-tx2/orbslam3`,
-  main 직커밋 워크플로 — `docs/handoff.md` 참고).
+- Topic name/type/QoS contract: [docs/ros2-topic-contract.md](docs/ros2-topic-contract.md)
+- Bridge node details: [docs/bridge-node.md](docs/bridge-node.md)
+- iPhone↔TX2 wire protocol: [docs/ios-tcp-protocol.md](docs/ios-tcp-protocol.md)
+- The SLAM node's (mono-inertial) C++ source isn't in this repo — it's in a separate repo,
+  `aisys-max/ORB_SLAM3_ROS2` (cloned at `/mnt/ssd/ros2_foxy/src/slam-tx2/orbslam3`, a
+  direct-commit-to-main workflow — see `docs/handoff.md`).
 
-## 이 저장소의 스크립트 (`scripts/`)
+## This repo's scripts (`scripts/`)
 
-| 스크립트 | 역할 |
+| Script | Role |
 |---|---|
-| [`ios_bridge_node.py`](scripts/ios_bridge_node.py) | iPhone TCP 스트림을 프로젝트 표준 센서 토픽으로 publish (브리지 노드) |
-| [`record_trajectory_tum.py`](scripts/record_trajectory_tum.py) | `/orb_slam3/trajectory`를 실시간으로 TUM 파일에 흘려 저장 — 맵 리셋으로 프로세스가 죽어도 유실 없음 |
-| [`analyze_tum_quality.py`](scripts/analyze_tum_quality.py) | TUM 궤적 파일에서 리셋/발행 gap/순간 점프 검출 ([#15](https://github.com/aisys-max/slam-tx2/issues/15)) |
-| [`evaluate_ate.py`](scripts/evaluate_ate.py) | 두 TUM 궤적 사이 ATE(정합 후 RMSE) 계산 — 라이브 vs 재생 동등성 검증([#7](https://github.com/aisys-max/slam-tx2/issues/7)) 등에 사용 |
-| [`capture_imu_pose.py`](scripts/capture_imu_pose.py) | 정지 자세에서 `/imu` 가속도/자이로 평균 캡처 — Tbc 추정용 ([#15](https://github.com/aisys-max/slam-tx2/issues/15)) |
-| [`estimate_tbc_rotation.py`](scripts/estimate_tbc_rotation.py) | 정지 자세 3개(카메라 아래/위/수평)의 중력 벡터로 카메라-IMU 회전(Tbc) 추정 |
-| [`compute_allan_variance.py`](scripts/compute_allan_variance.py) | 정지 상태로 장시간 기록한 `/imu` bag으로 Allan variance 계산 → IMU 노이즈 파라미터 |
-| [`calibrate_camera.py`](scripts/calibrate_camera.py), [`capture_calibration_images.py`](scripts/capture_calibration_images.py) | 체커보드로 카메라 내부 파라미터 캘리브레이션 ([docs/camera-calibration.md](docs/camera-calibration.md)) |
-| [`euroc_to_rosbag2.py`](scripts/euroc_to_rosbag2.py) | EuRoC 데이터셋을 프로젝트 표준 토픽 bag으로 변환 (오프라인 SLAM 노드 검증용) |
-| [`ios_bridge_node.py`](scripts/ios_bridge_node.py)와 짝인 `test_ios_bridge_node.py`, `test_ios_tcp_client.py` | 브리지 노드/와이어 프로토콜 유닛 테스트 |
+| [`ios_bridge_node.py`](scripts/ios_bridge_node.py) | Publishes the iPhone TCP stream as the project's standard sensor topics (bridge node) |
+| [`record_trajectory_tum.py`](scripts/record_trajectory_tum.py) | Streams `/orb_slam3/trajectory` to a TUM file in real time — nothing is lost even if the process dies from a map reset |
+| [`analyze_tum_quality.py`](scripts/analyze_tum_quality.py) | Detects resets/publish gaps/instantaneous jumps in a TUM trajectory file ([#15](https://github.com/aisys-max/slam-tx2/issues/15)) |
+| [`evaluate_ate.py`](scripts/evaluate_ate.py) | Computes ATE (RMSE after alignment) between two TUM trajectories — used for live vs. replay equivalence validation ([#7](https://github.com/aisys-max/slam-tx2/issues/7)), etc. |
+| [`capture_imu_pose.py`](scripts/capture_imu_pose.py) | Captures `/imu` accel/gyro averages at a static pose — for Tbc estimation ([#15](https://github.com/aisys-max/slam-tx2/issues/15)) |
+| [`estimate_tbc_rotation.py`](scripts/estimate_tbc_rotation.py) | Estimates the camera-IMU rotation (Tbc) from the gravity vector at 3 static poses (camera down/up/horizontal) |
+| [`compute_allan_variance.py`](scripts/compute_allan_variance.py) | Computes Allan variance from a long stationary `/imu` bag recording → IMU noise parameters |
+| [`calibrate_camera.py`](scripts/calibrate_camera.py), [`capture_calibration_images.py`](scripts/capture_calibration_images.py) | Camera intrinsic calibration via checkerboard ([docs/camera-calibration.md](docs/camera-calibration.md)) |
+| [`euroc_to_rosbag2.py`](scripts/euroc_to_rosbag2.py) | Converts the EuRoC dataset into a bag with the project's standard topics (for offline SLAM node validation) |
+| `test_ios_bridge_node.py`, `test_ios_tcp_client.py`, paired with [`ios_bridge_node.py`](scripts/ios_bridge_node.py) | Unit tests for the bridge node/wire protocol |
 
-## RViz2로 라이브 궤적 보기 (재현 절차)
+## Watching a live trajectory in RViz2 (reproduction procedure)
 
-### 0. 사전 준비
+### 0. Prerequisites
 
-- iPhone에서 `SlamCapture` 앱 실행 (Wi-Fi 직결 권장 — USB/iproxy보다 빠름. iPhone 설정 → Wi-Fi
-  → 연결된 네트워크 (i) 아이콘에서 IP 확인). 앱은 버튼 없이 `onAppear`에서 자동으로 캡처를
-  시작한다 ([ios/SlamCapture/ContentView.swift](ios/SlamCapture/ContentView.swift)).
-- TX2에서 ROS2 소스 (매번 이렇게 잡을 것 — `COLCON_TRACE` unbound-variable 이슈 때문):
+- Run the `SlamCapture` app on the iPhone (Wi-Fi direct recommended — faster than USB/iproxy.
+  Find the IP under iPhone Settings → Wi-Fi → connected network → the (i) icon). The app has no
+  button and starts capturing automatically in `onAppear`
+  ([ios/SlamCapture/ContentView.swift](ios/SlamCapture/ContentView.swift)).
+- Source ROS2 on the TX2 (do it this way every time — because of the `COLCON_TRACE`
+  unbound-variable issue):
   ```bash
   set +u; source /mnt/ssd/ros2_foxy/install/setup.bash; set -u
   ```
-- RViz2는 물리 모니터에서 실행할 것 (X11 forwarding은 TX2/NVIDIA-Tegra GLX 드라이버가 indirect
-  rendering을 지원 안 해서 실패함):
+- Run RViz2 on the physical monitor (X11 forwarding fails since the TX2/NVIDIA-Tegra GLX driver
+  doesn't support indirect rendering):
   ```bash
   ros2 run rviz2 rviz2
   ```
-  Fixed Frame을 `map`으로 설정하고, Add → By topic → `/orb_slam3/trajectory` → Path.
-  **Displays 패널에 Path 항목이 보여도 실제 구독이 안 될 수 있다** — 안 그려지면 아래 "확인"
-  절 참고.
+  Set Fixed Frame to `map`, and Add → By topic → `/orb_slam3/trajectory` → Path.
+  **The Path item can appear in the Displays panel without an actual subscription** — if nothing
+  draws, see the "Verify" step below.
 
-### 1. 브리지 노드
+### 1. Bridge node
 
 ```bash
 python3 scripts/ios_bridge_node.py <iPhone IP> 8765
 ```
-`연결됨` 로그가 뜨는지 확인. (여기서 연결됐다고 해서 센서 데이터가 바로 흐르는 건 아니다 —
-2번 SLAM 노드까지 띄운 뒤 `ros2 topic hz`로 최종 확인할 것.)
+Confirm the `Connected` log appears. (Connecting here doesn't mean sensor data is flowing yet —
+confirm with `ros2 topic hz` once the SLAM node from step 2 is also up.)
 
-### 2. SLAM 노드 (새 디렉터리에서, 어휘 로딩에 시간 걸림)
+### 2. SLAM node (in a fresh directory, vocabulary loading takes a while)
 
 ```bash
-mkdir -p /mnt/ssd/live_e2e/<세션 이름> && cd /mnt/ssd/live_e2e/<세션 이름>
+mkdir -p /mnt/ssd/live_e2e/<session name> && cd /mnt/ssd/live_e2e/<session name>
 ros2 run orbslam3 mono-inertial \
   /mnt/ssd/orb_slam3_stack/ORB_SLAM3/Vocabulary/ORBvoc.txt \
   /mnt/ssd/ros2_foxy/src/slam-tx2/orbslam3/config/monocular-inertial/iPhoneXsMax.yaml
 ```
-`There are 1 cameras in the atlas` 로그가 뜨면 준비 완료.
+Ready once you see the `There are 1 cameras in the atlas` log.
 
-### 3. 궤적 recorder (선택 — 나중에 정량 분석하려면 필요)
-
-```bash
-python3 scripts/record_trajectory_tum.py /mnt/ssd/live_e2e/<세션 이름>/trajectory.tum
-```
-
-### 4. 확인
+### 3. Trajectory recorder (optional — needed if you want to analyze it quantitatively later)
 
 ```bash
-ros2 topic info /orb_slam3/trajectory --verbose   # Subscription count에 rviz 노드가 있는지 확인
+python3 scripts/record_trajectory_tum.py /mnt/ssd/live_e2e/<session name>/trajectory.tum
 ```
-없으면 RViz Displays 패널에서 Path 항목을 지웠다가 다시 Add.
 
-### 5. 걷기
+### 4. Verify
 
-iPhone을 들고 **평행 이동 위주로, 제자리 회전 없이** 천천히 걷는다 (사각형 한 바퀴, 복도 왕복
-등). 제자리 회전/패닝은 단안 SLAM 최악의 입력이라 초기화가 안 된다.
+```bash
+ros2 topic info /orb_slam3/trajectory --verbose   # confirm the rviz node is in Subscription count
+```
+If not, remove the Path item in the RViz Displays panel and Add it again.
 
-맵이 리셋되면 SLAM 노드 로그에 `Map (re)initialized - clearing published trajectory...`가
-찍히고 RViz의 Path가 (좌표계가 바뀌었으므로) 비워지고 새로 시작한다 — 의도된 동작이다
-([#15](https://github.com/aisys-max/slam-tx2/issues/15)). 리셋이 너무 잦으면
-[#10](https://github.com/aisys-max/slam-tx2/issues/10)(프레임레이트 격차, TX2에서 실측
-~5.8Hz vs 목표 20Hz) 영향일 가능성이 크다.
+### 5. Walk
 
-### 정리 순서
+Hold the iPhone and walk slowly, **mostly translating, without spinning in place** (a loop
+around a square, back and forth down a hallway, etc.). Pure rotation/panning is the worst input
+for monocular SLAM and won't initialize.
 
-recorder → SLAM 노드 → 브리지 노드 순서로 Ctrl+C (또는 `kill`).
+When the map resets, the SLAM node log prints
+`Map (re)initialized - clearing published trajectory...` and RViz's Path is cleared (since the
+coordinate frame changed) and starts fresh — this is intended behavior
+([#15](https://github.com/aisys-max/slam-tx2/issues/15)). If resets happen too often, it's
+likely the effect of [#10](https://github.com/aisys-max/slam-tx2/issues/10) (a frame-rate gap —
+measured ~5.8Hz on the TX2 vs. a 20Hz target).
 
-## 더 자세히
+### Shutdown order
 
-- [docs/handoff.md](docs/handoff.md) — 현재 상태, 다음에 할 만한 일, 자주 막히는 지점 전체 목록
-- [docs/live-e2e-validation.md](docs/live-e2e-validation.md) — 라이브/재생 동등성 검증 전체 기록 ([#7](https://github.com/aisys-max/slam-tx2/issues/7))
-- [docs/adr/](docs/adr/) — 설계 결정 (타임스탬프 기준, ROS2 Foxy 채택, 어댑터 레이어 미채택 등)
+Ctrl+C (or `kill`) the recorder → SLAM node → bridge node, in that order.
+
+## Learn more
+
+- [docs/handoff.md](docs/handoff.md) — current status, what's worth doing next, the full list of
+  common sticking points
+- [docs/live-e2e-validation.md](docs/live-e2e-validation.md) — full record of live/replay
+  equivalence validation ([#7](https://github.com/aisys-max/slam-tx2/issues/7))
+- [docs/adr/](docs/adr/) — design decisions (timestamp basis, adopting ROS2 Foxy, no adapter
+  layer, etc.)

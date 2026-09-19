@@ -1,21 +1,37 @@
-# 프로젝트 표준 센서 토픽 계약
+# Project standard sensor topic contract
 
-브리지 노드, SLAM 노드, `ros2 bag record`/`play` 모두 이 계약을 따른다. 라이브 소스와 rosbag2 재생이 이 토픽들만으로 서로 완전히 대체 가능하다 ([ADR-0003](adr/0003-no-custom-adapter-layer.md)).
+> 한국어 버전은 [여기](ros2-topic-contract.ko.md)에 있습니다.
 
-| 토픽 | 타입 | 발행 주기(목표) | 비고 |
+The bridge node, the SLAM node, and `ros2 bag record`/`play` all follow this contract. A live
+source and a rosbag2 replay are fully interchangeable through these topics alone
+([ADR-0003](adr/0003-no-custom-adapter-layer.md)).
+
+| Topic | Type | Publish rate (target) | Notes |
 |---|---|---|---|
-| `/camera/image_raw` | `sensor_msgs/msg/Image` | 20~30Hz | 후면 카메라 프레임 (mono-inertial 시작 기준, mono8 또는 bgr8) |
-| `/camera/camera_info` | `sensor_msgs/msg/CameraInfo` | `image_raw`와 1:1 동기 | REP 104. `header.frame_id`가 `image_raw`와 동일해야 함 |
-| `/imu` | `sensor_msgs/msg/Imu` | ~200Hz | 가속도계+자이로. orientation 필드는 미사용(covariance[0] = -1) |
-| `/orb_slam3/trajectory` | `nav_msgs/msg/Path` | SLAM 노드가 포즈를 추정할 때마다 | SLAM 노드 출력. `header.frame_id`는 `map`(아래 예외 참고) |
+| `/camera/image_raw` | `sensor_msgs/msg/Image` | 20-30Hz | Rear camera frame (as of the mono-inertial baseline, mono8 or bgr8) |
+| `/camera/camera_info` | `sensor_msgs/msg/CameraInfo` | 1:1 sync with `image_raw` | REP 104. `header.frame_id` must match `image_raw` |
+| `/imu` | `sensor_msgs/msg/Imu` | ~200Hz | Accelerometer+gyro. The orientation field is unused (covariance[0] = -1) |
+| `/orb_slam3/trajectory` | `nav_msgs/msg/Path` | Every time the SLAM node estimates a pose | SLAM node output. `header.frame_id` is `map` (see exception below) |
 
-## 공통 규칙
+## Common rules
 
-- 모든 메시지의 `header.stamp`는 iPhone 캡처 시각(모노토닉 클럭) 기준이다 ([ADR-0001](adr/0001-timestamp-basis.md)). TX2 수신 시각을 쓰지 않는다.
-- 센서 토픽(`image_raw`, `camera_info`, `imu`)의 `header.frame_id`는 `camera_link`로 고정한다 (이후 IMU-카메라 외부 캘리브레이션이 필요해지면 `imu_link` 등을 추가하고 정적 `tf`로 연결한다 — 이번 MVP 범위 밖). **예외**: `/orb_slam3/trajectory`는 `map`을 쓴다 — 궤적은 시간에 걸쳐 고정된 세계 좌표계(SLAM 초기화 시 잡힌 원점) 기준으로 점을 찍어야 하는데, `camera_link`는 카메라에 고정돼 매 프레임 같이 움직이는 프레임이라 여기엔 쓸 수 없다 (`aisys-max/ORB_SLAM3_ROS2`의 `monocular-inertial-slam-node.cpp` 참고). 맵이 리셋되면 이전/이후 포즈의 좌표계가 달라지는데 토픽 자체엔 그 구분이 없다 — 알려진 한계.
-- QoS: 센서 토픽(`image_raw`, `camera_info`, `imu`)은 `rclcpp::SensorDataQoS()`(best-effort, depth 낮음)를 사용한다 — 실시간 센서 스트림 관례. `trajectory`는 `rclcpp::QoS(10)`(reliable)을 사용한다 — 유실되면 안 되는 결과물이기 때문이다.
-- 파일 소스(rosbag2 재생)와 라이브 소스(브리지 노드)는 이 토픽 이름/타입/QoS를 동일하게 publish해야 하며, 그 외의 방식으로 SLAM 노드에 데이터를 전달하지 않는다.
+- Every message's `header.stamp` is based on iPhone capture time (monotonic clock)
+  ([ADR-0001](adr/0001-timestamp-basis.md)). TX2 receipt time is never used.
+- The sensor topics' (`image_raw`, `camera_info`, `imu`) `header.frame_id` is fixed to
+  `camera_link` (if IMU-camera extrinsic calibration is needed later, add `imu_link` etc. and
+  connect it with a static `tf` — out of scope for this MVP). **Exception**: `/orb_slam3/trajectory`
+  uses `map` — a trajectory needs to plot points relative to a world frame that's fixed over
+  time (the origin captured at SLAM initialization), and `camera_link` can't be used for this
+  since it's attached to the camera and moves every frame (see `monocular-inertial-slam-node.cpp`
+  in `aisys-max/ORB_SLAM3_ROS2`). When the map resets, poses before/after have different
+  coordinate frames, but the topic itself carries no distinction for that — a known limitation.
+- QoS: the sensor topics (`image_raw`, `camera_info`, `imu`) use `rclcpp::SensorDataQoS()`
+  (best-effort, low depth) — standard practice for real-time sensor streams. `trajectory` uses
+  `rclcpp::QoS(10)` (reliable), since it's a result that must not be lost.
+- A file source (rosbag2 replay) and a live source (bridge node) must publish these same topic
+  names/types/QoS, and must not deliver data to the SLAM node by any other means.
 
-## LiDAR 확장 시
+## For a LiDAR extension
 
-`sensor_msgs/msg/PointCloud2`를 `/lidar/points` 등으로 추가하기만 하면 된다 — 기존 토픽 계약을 변경하지 않는다.
+Just add `sensor_msgs/msg/PointCloud2` as e.g. `/lidar/points` — no change to the existing topic
+contract is needed.

@@ -1,3 +1,8 @@
-# 세션 타임스탬프는 iPhone 캡처 시각 기준
+# Session timestamps are based on iPhone capture time
 
-USB 전송 지연이 일정하지 않기 때문에, TX2가 데이터를 수신한 시각을 세션의 타임스탬프 기준으로 삼으면 카메라-IMU 간 상대 타이밍이 흔들려 visual-inertial 초기화/정합이 깨질 수 있다. 따라서 세션(Session)의 모든 프레임과 IMU 샘플 타임스탬프는 iPhone의 모노토닉 클럭 기준 캡처 시각을 사용하고, TX2 수신 시각은 사용하지 않는다.
+> 한국어 버전은 [여기](0001-timestamp-basis.ko.md)에 있습니다.
+
+USB transfer latency is not constant, so if the TX2's receipt time were used as the session's
+timestamp basis, the relative timing between camera and IMU would jitter, which could break
+visual-inertial initialization/alignment. All frame and IMU sample timestamps in a Session
+therefore use the capture time from the iPhone's monotonic clock, never the TX2's receipt time.
