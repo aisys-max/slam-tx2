@@ -37,32 +37,34 @@ reset, verified live. Also done alongside it:
   procedure.
 
 Even after calibration, the reset frequency only improved (~1/s → ~1 per ~17s), it wasn't fully
-resolved, and the remaining bottleneck has been handed off to
-[#10](https://github.com/aisys-max/slam-tx2/issues/10) below — frame rate is still low (~5.8Hz),
+resolved, and the remaining bottleneck was handed off to
+[#10](https://github.com/aisys-max/slam-tx2/issues/10) below — frame rate was still low (~5.8Hz),
 with `Fail to track local map!` observed repeatedly.
 
-**Open issue**: [#10](https://github.com/aisys-max/slam-tx2/issues/10) — a real-time (20Hz)
-mono-inertial processing performance gap on the TX2. Triaged to `bug`+`ready-for-agent`
-(2026-09-19), with an agent brief posted on the issue. It's an item explicitly listed as Out of
-Scope in the MVP spec (#1) ("real-time performance optimization"), so it didn't block MVP
-completion, but #15's remaining tracking-instability issue effectively hinges on it, so it needs
-to be tackled next for real-world use.
+**[#10](https://github.com/aisys-max/slam-tx2/issues/10) fixed and verified live (2026-09-19)** —
+the bottleneck turned out to be CPU-bound in the bridge node itself, not network transport.
+Root cause: `sensor_msgs/Image`'s rosidl-generated `data` setter (`_image.py`) runs an
+element-wise `isinstance`/range check over the whole array in pure Python whenever the assigned
+value isn't already an `array.array` — for a 640x480 frame (307,200 bytes) that's ~157ms/frame
+(a ~6.4Hz ceiling on that field alone), matching the observed ~5.8Hz almost exactly.
+[`build_image()`](../scripts/ios_bridge_node.py) previously assigned `frame["pixels"]` (`bytes`)
+directly, hitting that slow path every frame; wrapping it in `array.array("B", ...)` before
+assignment hits the setter's fast path (`isinstance(value, array.array)`) instead. Verified live
+against the iPhone over Wi-Fi direct: `/camera/image_raw` went from ~5.8Hz to **~27.3Hz**, bridge
+node CPU dropped from 95-100% to **~13-16%**, and `/imu` improved too (~97Hz, up from an uneven
+50-69Hz) with no regression.
 
 ## What's worth doing next
 
-1. **#10 performance gap (top priority, ready-for-agent)** — the original hypothesis
-   ("USB/iproxy bandwidth is the bottleneck") was shaken by a 2026-09-19 retest: even over
-   Wi-Fi direct, going through the bridge node still only got ~1.27-5.8Hz while the bridge node
-   process occupied 95-100% CPU, whereas a past test connecting directly via a raw socket
-   without the bridge node (`test_ios_tcp_client.py --connect`) hit 27.6Hz — **the new leading
-   candidate is that the bottleneck is CPU-bound in the bridge node itself (e.g. the rclpy
-   publish path), not network transport**. See the
-   [#10 comment](https://github.com/aisys-max/slam-tx2/issues/10) for details and the agent
-   brief.
+1. **Re-validate full live SLAM session now that #10 is fixed** — #15's remaining
+   tracking-instability (resets, `Fail to track local map!`) was hypothesized to hinge on the
+   bridge node's frame rate; worth re-running the full RViz live-check procedure
+   ([README.md](../README.md)) now that `/camera/image_raw` runs near the 20-30Hz target, to see
+   how much of that instability it resolves.
 2. **Vehicle field testing / 17 Pro Max + LiDAR expansion** — the next stage explicitly listed
    as Out of Scope in the #1 spec. Designed to be extensible just by adding
    `sensor_msgs/PointCloud2`, since it's topic-based (design intent only, not implemented). Makes
-   sense to sequence this after #10 is resolved and tracking is stabilized.
+   sense to sequence this after tracking is confirmed stable post-#10.
 
 ## To run a live session again
 
@@ -99,13 +101,16 @@ duplicated here. If you need more detailed background (why each step does what i
    ```bash
    set +u; source /mnt/ssd/ros2_foxy/install/setup.bash; set -u
    ```
-9. **`ios_bridge_node.py` can nearly monopolize one CPU core while frame rate craters**
-   (observed 2026-09-19: dropped as low as ~1.27Hz). Restarting the bridge node sometimes helps
-   temporarily (~5.8Hz), but the root cause isn't fixed yet — see
-   [#10](https://github.com/aisys-max/slam-tx2/issues/10). `ros2 topic hz` can return nothing
-   but empty output since its QoS doesn't match a best-effort publisher, so on ROS2 Foxy (which
-   has no `--qos-reliability`-style option), measure actual frame rate with a separate rclpy
-   script that subscribes with best-effort QoS directly instead.
+9. **(Fixed 2026-09-19, [#10](https://github.com/aisys-max/slam-tx2/issues/10)) `ios_bridge_node.py`
+   used to nearly monopolize one CPU core while frame rate cratered** (observed dropping as low
+   as ~1.27Hz) — root cause was `sensor_msgs/Image.data`'s generated setter doing an element-wise
+   Python-level type check on every frame; fixed by wrapping the assigned value in
+   `array.array("B", ...)`. If you see a bridge node pegging a core again, check for a
+   regression here first before assuming it's transport/USB.
+10. **`ros2 topic hz` can return nothing but empty output** since its QoS doesn't match a
+   best-effort publisher, so on ROS2 Foxy (which has no `--qos-reliability`-style option),
+   measure actual frame rate with a separate rclpy script that subscribes with best-effort QoS
+   directly instead.
 
 ## Repo/environment layout
 
