@@ -1,4 +1,4 @@
-# Handoff (2026-09-19 기준)
+# Handoff (2026-09-20 기준)
 
 > English version [here](handoff.md).
 
@@ -114,37 +114,74 @@ array.array)`)를 타게 된다. iPhone에 Wi-Fi 직결로 라이브 검증: `/c
 패턴은 `Fail to track local map!`(보통 맵이 IMU 초기화를 시도하는 문턱인 키프레임 10개/2초에
 도달하기도 전), `scale too small`(IMU 초기화는 시도됐지만 visual-inertial 스케일 추정치가
 degenerate하게 나옴), 가끔 `Not enough motion for initializing`/`bad imu flag`, 그리고 이제
-위의 "노드가 사라짐" 문제 사이를 오간다. 이제는 단일 버그가 남은 게 아니라, 작고 적당히
-어두운 실내 공간에서 손에 든 폰으로 하는 ORB-SLAM3 mono-inertial 콜드스타트 자체의 원래
-예민함과, 아직 못 찾은 버그가 최소 하나 더 섞여있는 것일 수 있다 — "다음에 할 만한 일"
-참고. **이 글을 쓰는 시점까지, 2026-09-20 세션의 어떤 시도도 RViz에 라이브로 Path를
-그리는 데 성공하지 못했다.**
+위의 "노드가 사라짐" 문제 사이를 오간다.
+
+**근본 원인 분석 세션 (2026-09-20, 계속) — 체계적 진단으로 전환.** 위까지는 시도와 관찰
+위주였는데, 이후로는 로그를 실제로 파싱해서 근거를 만들고 가설을 하나씩 검증하는 방식으로
+전환했다. 절차와 근거는 [docs/imu-init-debug.md](imu-init-debug.ko.md)에 정리했다 (일반적인
+"Path 안 그려짐" 체크리스트가 아니라, 이 프로젝트에서 실제로 관찰된 실패 패턴 전용). 요약:
+
+- **`New Map created`는 계속 성공(115회 관찰)하는데 `start VIBA`(IMU 초기화 2단계)는 거의
+  0회** — 단안 부트스트랩 자체는 문제가 아니고, 초기화 직후 트래킹을 못 버티는 게 핵심.
+- **브리지 노드가 ~10~12초 주기로(같은 세션에서 402회) "연결 끊김: timed out" → 재연결을
+  반복**하고 있었고, 이 주기는 `ios_bridge_node.py`의 `recv_timeout=10.0` 기본값과 일치했다.
+  리셋 시각과 재연결 시각의 상관관계를 스크립트로 직접 확인함(`docs/imu-init-debug.ko.md`
+  1단계). `--recv-timeout 60`으로 재시도하니 **재연결이 0회로 사라지고, `start VIBA 1`이
+  같은 시간 동안 2회 발생**(그 전까지 세션 전체에서 0회였던 것과 대비) — 네트워크 재연결이
+  진짜 기여 요인이었음을 확인. 다만 VIBA 1이 두 번 다 트래킹 스레드의 동시 리셋과 겹쳐
+  결국 실패로 끝났고, `Fail to track local map!`은 여전히 반복됨 — **부분적 원인**이었을 뿐
+  전체 해결은 아니다.
+- **화질/텍스처/CPU 경합은 배제됨**: 프레임을 직접 덤프해서 선명도(Laplacian variance
+  평균 209, 심하게 흐린 프레임 0%)와 ORB 키포인트 수(평균 1371개, 100개 미만 0%)를 측정,
+  둘 다 충분했다. RViz2를 꺼서 시스템 부하를 낮춰봐도(load average 5.4→4.3) 결과 변화 없음.
+- **`Tracking.cc`에 임시 계측을 추가해 진짜 병목을 특정**: `TrackLocalMap()`의
+  `if(mCurrentFrame.mnId<mnLastRelocFrameId+mMaxFrames && mnMatchesInliers<50) return false;`
+  — 리셋 직후 `mMaxFrames`(=fps=25, 약 1초) 동안 로컬맵 인라이어 매치가 **50개 이상**
+  필요한 엄격한 게이트. 게다가 이 창을 벗어나도 IMU 미초기화 상태에선 여전히 50개가
+  필요해서(15개로 완화되는 건 IMU 초기화 **후**부터), 사실상 "IMU 초기화 전엔 항상
+  50개 필요 → 50개를 못 채우면 IMU 초기화도 안 됨"이라는 닭과 달걀 구조였다. 실측
+  인라이어 값은 대부분 25~48 사이로 문턱 바로 아래에서 반복 실패.
+- **50→30으로 낮추는 실험은 결론이 안 났다**: 재시도마다 실제 걷는 동작이 달라서
+  직접 비교가 안 됐고(어떤 시도는 인라이어가 1~9까지 떨어짐 — 모션 자체가 더 거칠었을
+  가능성), `start VIBA`는 여전히 0회. **이 실험 코드는 원복 완료.**
+- **반복 비교를 위해 걷기 세션 하나를 `ros2 bag record`로 녹화해 baseline으로 확보**
+  (`/mnt/ssd/live_e2e/baseline_walk/walk_bag`, 215초, 이미지 1184장/IMU 16525개 — 단
+  best-effort QoS라 bag 기록 중 이미지 손실이 있어 원본보다 낮은 프레임레이트로
+  기록됐을 수 있음, 참고용으로만 쓸 것). `ros2 bag play`로 재생하면 실제로 걷지 않아도
+  코드/설정 변경 전후를 동일 입력으로 비교 가능함을 확인함.
+- **이 baseline bag 재생 중 새 크래시를 하나 더 발견**(`EXIT_CODE=245`,
+  `"Not preintegrated measurement"` 직후 로그 끊김) — 라이브 테스트에선 한 번도 안 걸렸던
+  경로. `Optimizer.cc`의 `InertialOptimization`/`FullInertialBA`에서 `mpImuPreintegrated`가
+  null인 키프레임을 가드 없이 역참조하는 지점이 총 4곳 있었음(1곳은 경고만 찍고 그대로
+  역참조, 3곳은 경고조차 없이 역참조) — 전부 null이면 해당 엣지를 건너뛰도록 수정, 같은
+  bag으로 재검증하니 217초 재생 끝까지 크래시 없이 생존.
+- **이제 크래시 수정 4개 전부를 `https://github.com/aisys-max/ORB_SLAM3`(업스트림 포크,
+  커밋 `e444ea4`)에 커밋+푸시했다** — 더 이상 로컬에만 존재하는 유실 위험 상태가 아니다.
+  아래 "저장소/환경 구조"에 반영.
+
+**요약**: 크래시 계열 문제(총 4개)는 전부 찾아서 고치고 포크에 영속화했다. 네트워크
+재연결 문제도 원인을 규명하고 `--recv-timeout 60`으로 완화했다. 하지만 **핵심 트래킹
+문제(리셋 직후 50개 인라이어 문턱을 거의 못 넘음)는 아직 미해결**이고, 이 글을 쓰는
+시점까지 2026-09-20 세션의 어떤 시도도 RViz에 라이브로 Path를 지속적으로 그리는 데
+성공하지 못했다.
 
 ## 다음에 할 만한 일
 
-1. **위 "SLAM 노드가 ROS2 그래프에서 사라지는" 문제부터 근본 원인을 찾을 것** — 다른 모든
-   수정 위에 남은 현재 블로커다. (앞선 크래시 2개를 잡았던 것처럼) gdb로 재현해서 실제
-   죽는 스레드의 백트레이스를 잡을 것 — 메인 스레드에서 뭔가 uncaught C++ exception이
-   전파되면서 프로세스는 안 죽고 rclcpp 노드/System 객체만 파괴되는 게 유력한 가설이지만
-   확인은 안 됐다.
-2. **`UZ-SLAMLab/ORB_SLAM3`를 포크하거나(또는 `aisys-max/ORB_SLAM3_ROS2` 빌드가 벤더링하도록
-   해서) 위 크래시 수정 3개를 영속화할 것** — 지금은 `/mnt/ssd/orb_slam3_stack/ORB_SLAM3`(업스트림을
-   포크 없이 그냥 클론한 것)에 커밋 안 된 로컬 수정으로만 존재한다. 이 디렉터리가
-   리셋되거나 재클론되면 세 크래시가 조용히 되살아난다. 이 빌드를 다시 누군가 쓰기 전에,
-   그리고 위 1번 디버깅으로 코어덤프가 디스크를 더 잡아먹기 전에(아래 디스크 관련 자주
-   막히는 지점 참고) 처리할 것.
-3. **라이브 IMU 초기화를 한 번이라도 끝까지 성공시키고 그 조건을 기록할 것** — 2026-09-20
-   세션의 모든 시도가 MAXN, 크래시 수정 3개, 위 YAML 재튜닝에도 불구하고 실패했다. 시도해볼
-   것: 더 확실한 연속 동작(시도 사이사이 멈춰서 확인받는 대화형 패턴 자체가 IMU 초기화에
-   필요한 연속 트래킹 구간을 계속 깨고 있었을 수 있다), 더 밝고 무늬가 많은 방, 짧게
-   끊어서가 아니라 30초 이상 끊김 없이 걷기.
-4. **오래 유지된 브리지 TCP 연결이 느려지는 문제를 더 파볼 것** (위 참고) — 재연결로
-   우회는 되지만 진짜 해결책은 아니다. 주기적으로 선제적 재연결을 하거나,
-   `TCP_NODELAY`/소켓 버퍼 튜닝이 도움되는지 확인해볼 가치가 있다.
-5. **차량 실측 / 17 Pro Max + LiDAR 확장** — #1 스펙의 Out of Scope에 명시된 다음 단계.
+1. **`TrackLocalMap()`의 리셋 직후 50-인라이어 게이트를 더 정밀하게 공략할 것** —
+   `docs/imu-init-debug.md`에서 확인한 핵심 병목. 임계값을 단순히 낮추는 실험은
+   (모션을 반복 재현할 수 없어) 결론이 안 났다 — 이제 baseline bag이 있으니, **bag
+   재생으로 동일 입력을 놓고** 임계값을 여러 단계로 바꿔가며 제대로 비교할 것. 또는
+   임계값을 안 건드리고, 리셋 직후 초기 맵의 맵포인트 품질/개수 자체를 늘리는 쪽(더
+   넓은 파랄락스로 2-view init하도록 유도, 초기 맵의 아웃라이어 제거 강화 등)도 검토.
+2. **위 "SLAM 노드가 ROS2 그래프에서 사라지는" 문제 근본 원인을 찾을 것** — 이번
+   세션엔 `/rviz` 노드에서도 같은 증상이 관찰됨(재시작 없이는 subscription이 안 살아남음).
+   gdb로 재현해서 실제 죽는 스레드의 백트레이스를 잡을 것.
+3. **오래 유지된 브리지 TCP 연결이 느려지는 문제를 더 파볼 것** — `--recv-timeout 60`으로
+   재연결 빈도는 크게 줄었지만 근본 해결은 아니다. `TCP_NODELAY`/소켓 버퍼 튜닝, 또는
+   주기적 선제 재연결이 도움되는지 확인.
+4. **차량 실측 / 17 Pro Max + LiDAR 확장** — #1 스펙의 Out of Scope에 명시된 다음 단계.
    토픽 기반 구조라 `sensor_msgs/PointCloud2` 추가만으로 확장 가능하도록 설계되어 있다
-   (설계 의도만 있고 구현은 없음). #10 수정 후 트래킹이 안정적임을 확인한 뒤 진행하는 게
-   순서상 맞을 것.
+   (설계 의도만 있고 구현은 없음). 트래킹이 안정적임을 확인한 뒤 진행하는 게 순서상 맞을 것.
 
 ## 라이브 세션을 다시 돌리려면
 
@@ -191,12 +228,12 @@ degenerate하게 나옴), 가끔 `Not enough motion for initializing`/`bad imu f
    `sudo nvpmodel -m 0 && sudo jetson_clocks`로 `MAXN`(6코어, 최대 클럭) 적용. MAXN으로
    오래 돌릴 땐 온도도 같이 볼 것(`cat /sys/devices/virtual/thermal/thermal_zone*/temp`) —
    팬이 응답하도록 설정 안 돼 있을 수 있다(`nvpmodel`이 `fan mode is not set!` 경고를 낸다).
-12. **`/mnt/ssd/orb_slam3_stack/ORB_SLAM3`(벤더링된 업스트림 ORB-SLAM3)에 커밋 안 된 로컬
-   크래시 수정 3개가 있다** (`Optimizer.cc`의 null 포인터 세그폴트, `LocalMapping.cc`와
-   `ImuTypes.cc`의 NaN 크래시 2개 — 위 2026-09-20 세션 기록 참고). `UZ-SLAMLab/ORB_SLAM3`를
-   포크 없이 그냥 클론한 것이라 이 변경을 추적하는 게 아무것도 없다 — 디렉터리가
-   리셋/재클론되면 세 크래시가 조용히 되살아난다. 거기서 뭔가 바꾸면 `libORB_SLAM3.so`를
-   반드시 리빌드할 것 (`cd .../ORB_SLAM3/build && make ORB_SLAM3`).
+12. **(2026-09-20 해소됨) `/mnt/ssd/orb_slam3_stack/ORB_SLAM3`의 크래시 수정 4개는 이제
+   `https://github.com/aisys-max/ORB_SLAM3`(업스트림 포크, `origin` 리모트, 커밋 `e444ea4`)에
+   커밋+푸시돼 있다** — `upstream` 리모트는 원본 `UZ-SLAMLab/ORB_SLAM3`를 가리킨다. 거기서
+   뭔가 더 바꾸면 반드시 커밋+푸시하고, `libORB_SLAM3.so`도 리빌드할 것
+   (`cd .../ORB_SLAM3/build && make ORB_SLAM3`). 디렉터리 자체가 리셋/재클론되면 이제
+   `git clone https://github.com/aisys-max/ORB_SLAM3.git`으로 안전하게 복구 가능하다.
 13. **`ulimit -c unlimited` 상태에서 프로세스가 크래시하면 이 TX2의 root 파일시스템이
    금방 찬다.** mono-inertial이 크래시할 때마다 `/var/lib/apport/coredump/`에 ~1GB
    코어덤프가 남았다(지우려면 `sudo rm` 필요, root 소유). root 파티션이 28G뿐이고 이번
@@ -213,7 +250,13 @@ degenerate하게 나옴), 가끔 `Not enough motion for initializing`/`bad imu f
 - ORB-SLAM3 ROS2 래퍼(`aisys-max/ORB_SLAM3_ROS2`, 별도 repo, main 직커밋 워크플로): 클론
   위치 `/mnt/ssd/ros2_foxy/src/slam-tx2/orbslam3`. SLAM 노드 C++ 코드가 여기 있음.
 - ROS2 Foxy 빌드: `/mnt/ssd/ros2_foxy` (colcon 워크스페이스, git 추적 안 됨).
+- 벤더링된 ORB-SLAM3 코어(`aisys-max/ORB_SLAM3`, `UZ-SLAMLab/ORB_SLAM3` 포크, main 직커밋
+  워크플로): 클론 위치 `/mnt/ssd/orb_slam3_stack/ORB_SLAM3` (`origin`=포크, `upstream`=원본).
+  크래시 수정 4개가 여기 커밋돼 있음. `libORB_SLAM3.so`를 `aisys-max/ORB_SLAM3_ROS2`가
+  링크해서 씀 — 여기서 수정하면 반드시 `make ORB_SLAM3`로 리빌드할 것.
 - 캡처 산출물: `/mnt/ssd/live_e2e/` (bag, trajectory.tum 등 — 세션마다 새 디렉터리 권장).
+  `baseline_walk/walk_bag`는 반복 비교용 baseline (215초 실내 걷기, 이미지 손실 있을 수
+  있어 참고용).
 
 ## 관련 문서
 
@@ -224,5 +267,6 @@ degenerate하게 나옴), 가끔 `Not enough motion for initializing`/`bad imu f
 - [bridge-node.md](bridge-node.ko.md) — 브리지 노드 설정/실행/검증
 - [euroc-validation.md](euroc-validation.ko.md) — EuRoC 기반 SLAM 노드 검증(#3)
 - [live-e2e-validation.md](live-e2e-validation.ko.md) — 라이브 e2e 검증 전체 기록(#7)
+- [imu-init-debug.md](imu-init-debug.ko.md) — IMU 초기화(VIBA1 미도달) 근본 원인 진단 절차/근거
 - [tx2-build-notes.md](tx2-build-notes.ko.md) — TX2 빌드 환경 노트
 - `docs/adr/` — 설계 결정(타임스탬프 기준, ROS2 Foxy 채택, 어댑터 레이어 미채택, SLAM 래퍼 선택)

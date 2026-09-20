@@ -1,0 +1,147 @@
+# IMU 초기화(VIBA1 미도달) 디버깅 절차
+
+> English version [here](imu-init-debug.md).
+
+**대상**: `mono-inertial` 노드가 `New Map created`(단안 초기화)까지는 반복적으로 성공하지만
+`start VIBA 1`(IMU 초기화 2단계)에는 한 번도 도달하지 못하는 문제.
+**작성 배경**: 2026-09-20 라이브 재검증 세션, `KTM4RL` Wi-Fi, 로그
+`/mnt/ssd/live_e2e/issue10_oldwifi_back/slam_node.log` + `/mnt/ssd/live_e2e/bridge_oldwifi_back.log`
+분석 결과를 근거로 작성. 일반적인 "RViz Path 안 그려짐" 체크리스트(토픽/frame_id/QoS/TF)는 이미
+전부 확인 완료 상태(Path가 짧게라도 그려지는 건 확인됨)이므로 이 문서에서는 다루지 않는다 -
+`docs/handoff.md`의 "Live re-verification session" 절 참고.
+
+## 확인된 사실 (2026-09-20 세션 로그 근거)
+
+이 절의 숫자는 전부 위 두 로그 파일을 직접 파싱해서 얻은 것이며, 다음 세션에서 새 로그로
+재확인할 때 같은 방식(grep -c, 아래 상관관계 스크립트)을 그대로 쓰면 된다.
+
+- `New Map created`: 115회 / `Fail to track local map!`: 113회 / `start VIBA`: **0회**
+  → 단안 부트스트랩 자체는 문제가 아니다. IMU 초기화 문턱(키프레임 수 + 시간)까지 트래킹이
+  버티질 못한다.
+- `New Map created` 발생 후 **거의 예외 없이 로그 1~3줄 이내**(=다음으로 처리된 프레임 1개)에
+  `TRACK_REF_KF: Less than 15 matches!!` → `Fail to track local map!` → 리셋이 뒤따른다.
+  362개 이벤트 샘플에서 예외 없음.
+- 같은 세션에서 브리지 노드(`ios_bridge_node.py`)가 **~10~12초 주기로 402회** "연결 끊김:
+  timed out" → 재연결을 반복했다. 이 주기는 `recv_timeout=10.0`(기본값, `--recv-timeout`)과
+  일치한다.
+- ORB extractor 설정(`nFeatures=1500`, `iniThFAST=12`)과 `fps=25`는 로그의
+  "ORB Extractor Parameters" 출력으로 실제 반영 확인됨 - 설정이 안 먹은 게 아니다.
+
+## 리딩 가설
+
+브리지의 `recv_timeout`이 주기적인 네트워크/iPhone 쪽 정체와 맞물려 ~10초마다 연결이 끊기고
+재연결된다. 그 구간 동안 카메라 프레임이 통째로 누락되므로, 재연결 직후 SLAM 노드가 받는
+"바로 다음 프레임"은 몇 초 전 프레임과 실제로는 크게 떨어진 장면이다 → 파라랙스/외형이 급변해
+참조 키프레임과의 매칭이 15개 밑으로 떨어짐 → 즉시 트래킹 실패 → 리셋. 이 사이클이 반복되니
+IMU 초기화에 필요한 연속 트래킹 구간(최소 키프레임 수 + 2초)을 절대 확보하지 못한다.
+
+이게 맞다면 지금까지의 "모션 타이밍이 안 좋아서"라는 설명은 틀렸고, **네트워크 안정성 문제**다.
+
+## 단계
+
+### 1단계 - 리셋 시각과 재연결 시각의 상관관계 재확인
+
+다른 세션 로그에도 같은 패턴이 있는지 아래로 확인 (파일 경로만 바꿔서 재사용):
+
+```bash
+python3 - <<'EOF'
+import re
+from datetime import datetime
+
+bridge_log = "/mnt/ssd/live_e2e/<브리지 로그 경로>"
+slam_log = "/mnt/ssd/live_e2e/<slam_node.log 경로>"
+
+bridge_events = []
+for l in open(bridge_log):
+    m = re.match(r"\[\w+\] \[(\d+)\.\d+\] \[ios_bridge\]: (.+)", l)
+    if m and ("연결됨" in m.group(2) or "끊김" in m.group(2)):
+        bridge_events.append((float(m.group(1)), m.group(2).strip()))
+
+reset_lines = []
+prev_t = None
+for l in open(slam_log):
+    m = re.match(r"\[\w+\] \[(\d+)\.\d+\]", l)
+    if m:
+        prev_t = float(m.group(1))
+    if "Fail to track local map" in l and prev_t:
+        reset_lines.append(prev_t)
+
+# 각 reset 시각에서 가장 가까운 브리지 이벤트까지의 시간차
+import statistics
+diffs = []
+for rt in reset_lines:
+    nearest = min(bridge_events, key=lambda be: abs(be[0]-rt))
+    diffs.append(abs(nearest[0]-rt))
+print(f"reset {len(reset_lines)}건, 가장 가까운 브리지 이벤트까지 평균 {statistics.mean(diffs):.2f}s, "
+      f"중앙값 {statistics.median(diffs):.2f}s")
+print(f"2초 이내인 비율: {sum(1 for d in diffs if d<2)/len(diffs)*100:.0f}%")
+EOF
+```
+
+- **PASS 기준**: 리셋 시각 대부분(대략 70% 이상)이 브리지 재연결 이벤트 ±2초 이내에 겹침 →
+  가설 확인, 2단계로
+- **FAIL 기준**: 안 겹침 → 가설 기각, 4단계(모션/환경 원인)로 바로 이동
+
+### 2단계 - 정체 원인이 브리지 코드 쪽인지 iPhone/Wi-Fi 링크 쪽인지 격리
+
+브리지 노드 없이 `test_ios_tcp_client.py`로 iPhone에 직접 붙어서 60초 이상 관찰:
+
+```bash
+python3 scripts/test_ios_tcp_client.py --connect <iPhone IP> --duration 60
+```
+
+- **PASS 기준(재현됨)**: 브리지 없이도 동일 주기로 타임아웃/끊김이 재현 → 문제는 브리지
+  코드가 아니라 iPhone/Wi-Fi 링크 자체 → 3단계로
+- **FAIL 기준(재현 안 됨)**: 브리지를 거칠 때만 발생 → `ios_bridge_node.py`의 이벤트 루프/
+  `_recv_exact_before_deadline` 로직 자체를 재검토 (예: deadline이 메시지 단위가 아니라
+  누적으로 걸리고 있는 건 아닌지)
+
+### 3단계 - iPhone Wi-Fi 절전/저전력 모드 배제
+
+- iPhone 설정에서 저전력 모드(Low Power Mode) 끄고, 화면 계속 켜진 상태 유지하며 2단계를
+  재실행
+- 앱 코드 확인: `TCPServer.swift`가 소켓에 `TCP_NODELAY`(Nagle 비활성화)나 keep-alive를
+  설정하고 있는지 확인 (`ios/SlamCapture/TCPServer.swift`)
+- **PASS 기준**: 저전력 모드를 꺼도 여전히 ~10초 주기로 정체 재현 → iOS 설정 문제 아님,
+  5단계(브리지 타임아웃 값 실험)로
+- **FAIL 기준**: 저전력 모드 끄니 사라짐 → iOS 사용 전제 조건 문서화(README에 "저전력 모드
+  끄고 사용" 명시)로 해결, 6단계(종단 확인)로
+
+### 4단계 - (1단계가 FAIL인 경우만) 즉시-실패 매칭이 진짜 저텍스처/모션 때문인지 확인
+
+- `New Map created` 직후와 그 다음 처리된 프레임, 두 장을 실제로 저장해서 육안 비교
+  (`rqt_image_view`로 `/camera/image_raw`를 띄워두고 리셋 순간 캡처, 또는 브리지에 임시로
+  프레임 dump 옵션 추가)
+- **PASS 기준(두 프레임이 크게 다름 - 블러 심하거나 장면이 많이 바뀜)**: 이동 속도/모션 블러
+  문제 → 초기화 직후 몇 초는 아주 천천히 움직이도록 프로토콜 조정
+- **FAIL 기준(두 프레임이 육안으로 거의 같은데도 매칭 실패)**: 매칭/디스크립터 계산 자체의
+  버그 가능성 → `ORBmatcher`/`TrackReferenceKeyFrame` 코드 레벨 조사 필요
+
+### 5단계 - `recv_timeout` 완화 실험 (빠른 실험, 코드 변경 없이 CLI 인자만)
+
+```bash
+python3 scripts/ios_bridge_node.py <iPhone IP> 8765 --recv-timeout 60
+```
+
+- **PASS 기준**: 재연결 빈도가 급감하고, 같은 시간 동안 `start VIBA` 로그가 최소 1회 이상
+  등장 → 근본 원인 확정. 정식 수정으로 `recv_timeout` 기본값 상향 또는 heartbeat/keep-alive
+  도입을 PR로 진행
+- **FAIL 기준**: 재연결은 줄었는데도 여전히 `Fail to track local map!`이 즉시 반복 →
+  `recv_timeout`이 유일한 원인은 아니었다는 뜻, 4단계 병행
+
+### 6단계 - 종단 확인
+
+위에서 나온 수정을 적용한 뒤, 독립된 세션 3회 이상에서 `start VIBA 1` 로그가 등장하고 RViz
+Path가 트래킹 리셋 없이 최소 수 초 이상 지속되는지 확인. 3회 중 3회 다 되면 완료로 간주.
+
+## 요약 판정 트리
+
+```
+1단계 PASS (리셋≈재연결 시각 일치)
+  → 2단계 PASS (브리지 없이도 재현) → 3단계
+      → 3단계 PASS (저전력모드 꺼도 재현) → 5단계
+      → 3단계 FAIL (저전력모드 끄니 해결) → 6단계
+  → 2단계 FAIL (브리지에서만 재현) → 브리지 코드 재검토
+1단계 FAIL (리셋과 재연결 시각 무관)
+  → 4단계 → PASS(모션/블러) 또는 FAIL(매칭 버그 코드 조사)
+```

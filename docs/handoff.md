@@ -1,4 +1,4 @@
-# Handoff (as of 2026-09-19)
+# Handoff (as of 2026-09-20)
 
 > 한국어 버전은 [여기](handoff.ko.md)에 있습니다.
 
@@ -124,38 +124,82 @@ None of the above have fully resolved the live initialization failure by themsel
 remaining failure modes cycle between `Fail to track local map!` (usually before the map even
 reaches the 10-keyframe/2s threshold to attempt IMU init), `scale too small` (IMU init attempted
 but the visual-inertial scale estimate came out degenerate), occasionally `Not enough motion
-for initializing` / `bad imu flag`, and now the "node disappears" issue above. This now looks
-like it may be a mix of inherent brittleness in ORB-SLAM3's mono-inertial cold-start in a small,
-moderately-lit indoor space with a hand-held phone, plus at least one more real bug still to
-find — see "What's worth doing next". **As of this writing, no attempt in the 2026-09-20 session
-has successfully drawn a live Path in RViz.**
+for initializing` / `bad imu flag`, and now the "node disappears" issue above.
+
+**Root-cause session (2026-09-20, continued) — switched to systematic diagnosis.** Up to this
+point it had been mostly trial-and-observation; from here on, logs were actually parsed for
+evidence and hypotheses tested one at a time. Procedure and evidence are written up in
+[docs/imu-init-debug.md](imu-init-debug.md) (not a generic "Path won't draw" checklist — specific
+to the failure patterns actually observed in this project). Summary:
+
+- **`New Map created` kept succeeding (115 occurrences observed) while `start VIBA` (IMU init
+  stage 2) happened almost never** — monocular bootstrap itself isn't the problem; tracking just
+  can't survive long enough after it.
+- **The bridge node was cycling "연결 끊김: timed out" → reconnect roughly every 10-12s (402
+  times in one session)**, a period matching `ios_bridge_node.py`'s `recv_timeout=10.0` default.
+  Directly confirmed the correlation between reset times and reconnect times with a script (Step
+  1 in `docs/imu-init-debug.md`). Retried with `--recv-timeout 60`: **reconnects dropped to 0,
+  and `start VIBA 1` fired twice in the same amount of time** (versus zero across the entire rest
+  of the session) — confirming network reconnects were a real contributing factor. However both
+  VIBA 1 attempts overlapped with a concurrent reset from the tracking thread and still ended in
+  failure, and `Fail to track local map!` kept recurring — **a partial cause, not the full fix**.
+- **Ruled out image quality/texture/CPU contention**: dumped frames directly and measured
+  sharpness (mean Laplacian variance 209, 0% severely blurred) and ORB keypoint counts (mean
+  1371, 0% under 100) — both were ample. Killing RViz2 to lower system load (load average 5.4→4.3)
+  changed nothing.
+- **Added temporary instrumentation to `Tracking.cc` and pinpointed the real bottleneck**:
+  `TrackLocalMap()`'s
+  `if(mCurrentFrame.mnId<mnLastRelocFrameId+mMaxFrames && mnMatchesInliers<50) return false;` — a
+  strict gate requiring **50+** local-map inlier matches during the `mMaxFrames` (=fps=25, ~1s)
+  window right after any reset. Worse, outside that window the requirement stays at 50 as long as
+  IMU isn't initialized yet (it only relaxes to 15 *after* IMU init) — effectively a chicken-and-egg
+  loop: "50 required until IMU init, but IMU init needs surviving past 50." Measured inlier counts
+  mostly clustered 25-48, repeatedly failing just under the threshold.
+- **The 50→30 threshold-lowering experiment was inconclusive**: each retry involved genuinely
+  different walking motion (no way to reproduce it exactly), so direct comparison wasn't valid
+  (one attempt saw inliers drop as low as 1-9 — possibly just rougher motion that time), and
+  `start VIBA` stayed at 0. **This experimental code has been reverted.**
+- **Recorded one walking session with `ros2 bag record` as a repeatable baseline for comparison**
+  (`/mnt/ssd/live_e2e/baseline_walk/walk_bag`, 215s, 1184 images/16525 IMU messages — note:
+  best-effort QoS means some images were likely dropped during bag recording itself, so the
+  recorded frame rate may be lower than the original; treat it as a reference, not a perfect
+  reproduction). Confirmed `ros2 bag play` lets code/config changes be compared against identical
+  input without needing to walk again each time.
+- **Found one more crash while replaying this baseline bag** (`EXIT_CODE=245`, log cutting off
+  right after `"Not preintegrated measurement"`) — a path live testing had never hit. Found four
+  call sites in `Optimizer.cc`'s `InertialOptimization`/`FullInertialBA` that dereferenced a
+  keyframe's `mpImuPreintegrated` without a null guard (one logged a warning and dereferenced it
+  anyway, three didn't even warn) — fixed all four to skip that keyframe's edge when null;
+  re-verified against the same bag, survived the full 217s replay without crashing.
+- **All four crash fixes are now committed and pushed to
+  `https://github.com/aisys-max/ORB_SLAM3` (an upstream fork, commit `e444ea4`)** — no longer at
+  risk of silently disappearing from a local-only clone. Reflected in "Repo/environment layout"
+  below.
+
+**Summary**: all 4 crash-class bugs found so far have been fixed and persisted to the fork. The
+network-reconnect issue has been root-caused and mitigated with `--recv-timeout 60`. But **the
+core tracking problem (almost never clearing the post-reset 50-inlier gate) remains unresolved**,
+and as of this writing, no attempt in the 2026-09-20 session has successfully drawn a sustained
+live Path in RViz.
 
 ## What's worth doing next
 
-1. **Root-cause the "SLAM node disappears from the ROS2 graph" issue above** — this is the
-   current blocker on top of everything else being fixed. Repro under gdb (like the two earlier
-   crashes were caught) to get a real backtrace of whichever thread is dying; the working
-   hypothesis is an uncaught C++ exception unwinding and destroying the rclcpp node/System object
-   on the main thread without terminating the process, but that's unconfirmed.
-2. **Fork `UZ-SLAMLab/ORB_SLAM3` (or patch `aisys-max/ORB_SLAM3_ROS2`'s build to vendor it) to
-   persist the three crash fixes above** — right now they only exist as uncommitted local edits in
-   `/mnt/ssd/orb_slam3_stack/ORB_SLAM3`, a plain clone of upstream with no fork/remote of our own.
-   Any reset of that directory silently reintroduces all three crashes. Do this before anyone
-   relies on this build again, and before debugging item 1 above eats more disk via core dumps
-   (see the disk-space sticking point below).
-3. **Get one successful live IMU initialization end-to-end and capture what conditions produced
-   it** — none of the 2026-09-20 session's attempts succeeded despite MAXN, all three crash fixes,
-   and the YAML retuning above. Try: more deliberate motion (continuous, not stop-and-check-in
-   between attempts — the conversational back-and-forth of a live debugging session may itself
-   have been breaking up the continuous good-tracking window IMU init needs), a brighter/more
-   textured room, or eventually a longer uninterrupted walk (30s+) rather than short bursts.
-4. **Investigate the long-lived bridge TCP connection degradation** (see above) — reconnecting
-   works around it but isn't a real fix. Possibly worth a periodic proactive reconnect, or
-   investigating whether `TCP_NODELAY`/socket buffer tuning helps.
-5. **Vehicle field testing / 17 Pro Max + LiDAR expansion** — the next stage explicitly listed
+1. **Attack the `TrackLocalMap()` post-reset 50-inlier gate more precisely** — the core bottleneck
+   identified in `docs/imu-init-debug.md`. Simply lowering the threshold was inconclusive (motion
+   isn't reproducible live) — now that a baseline bag exists, **compare threshold values properly
+   against identical replayed input**. Alternatively, instead of touching the threshold, look at
+   improving the initial map's point count/quality right after reset (wider-parallax 2-view init,
+   stronger outlier rejection on the initial map).
+2. **Root-cause the "SLAM node disappears from the ROS2 graph" issue** — this session the same
+   symptom was also observed on the `/rviz` node (its subscription doesn't survive without a
+   restart). Repro under gdb to get a real backtrace of whichever thread is dying.
+3. **Investigate the long-lived bridge TCP connection degradation further** — `--recv-timeout 60`
+   sharply cut reconnect frequency but isn't a full fix. Check whether `TCP_NODELAY`/socket buffer
+   tuning or periodic proactive reconnects help.
+4. **Vehicle field testing / 17 Pro Max + LiDAR expansion** — the next stage explicitly listed
    as Out of Scope in the #1 spec. Designed to be extensible just by adding
    `sensor_msgs/PointCloud2`, since it's topic-based (design intent only, not implemented). Makes
-   sense to sequence this after tracking is confirmed stable post-#10.
+   sense to sequence this after tracking is confirmed stable.
 
 ## To run a live session again
 
@@ -207,12 +251,12 @@ duplicated here. If you need more detailed background (why each step does what i
    `sudo nvpmodel -m 0 && sudo jetson_clocks` for `MAXN` (6 cores, max clocks). Watch temps
    (`cat /sys/devices/virtual/thermal/thermal_zone*/temp`) if running MAXN for a long session —
    the fan may not have been configured to respond (`nvpmodel` warns `fan mode is not set!`).
-12. **The vendored upstream ORB-SLAM3 at `/mnt/ssd/orb_slam3_stack/ORB_SLAM3` has three local,
-   uncommitted crash fixes** (null-pointer segfault in `Optimizer.cc`, two NaN crashes in
-   `LocalMapping.cc` and `ImuTypes.cc` — see the 2026-09-20 session notes above). It's a plain
-   clone of `UZ-SLAMLab/ORB_SLAM3`, not a fork, so nothing tracks these changes — if the directory
-   gets reset or re-cloned, all three crashes come back silently. `libORB_SLAM3.so` must be
-   rebuilt (`cd .../ORB_SLAM3/build && make ORB_SLAM3`) after any change there.
+12. **(Resolved 2026-09-20) The four crash fixes in `/mnt/ssd/orb_slam3_stack/ORB_SLAM3` are now
+   committed and pushed to `https://github.com/aisys-max/ORB_SLAM3`** (an upstream fork, `origin`
+   remote, commit `e444ea4`) — `upstream` remote points at the real `UZ-SLAMLab/ORB_SLAM3`. Any
+   further change there must be committed+pushed, and `libORB_SLAM3.so` rebuilt
+   (`cd .../ORB_SLAM3/build && make ORB_SLAM3`). If the directory itself is ever reset/re-cloned,
+   it can now be safely recovered with `git clone https://github.com/aisys-max/ORB_SLAM3.git`.
 13. **`ulimit -c unlimited` + a crashing process on this TX2 fills the root filesystem fast.**
    Each mono-inertial crash left a ~1GB core dump in `/var/lib/apport/coredump/` (needs
    `sudo rm` to clear, owned by root). The root partition is only 28G and was already tight
@@ -230,8 +274,14 @@ duplicated here. If you need more detailed background (why each step does what i
   workflow): cloned at `/mnt/ssd/ros2_foxy/src/slam-tx2/orbslam3`. The SLAM node's C++ code lives
   here.
 - ROS2 Foxy build: `/mnt/ssd/ros2_foxy` (colcon workspace, not git-tracked).
+- Vendored ORB-SLAM3 core (`aisys-max/ORB_SLAM3`, a fork of `UZ-SLAMLab/ORB_SLAM3`,
+  direct-commit-to-main workflow): cloned at `/mnt/ssd/orb_slam3_stack/ORB_SLAM3`
+  (`origin`=fork, `upstream`=original). The 4 crash fixes are committed here.
+  `aisys-max/ORB_SLAM3_ROS2` links against `libORB_SLAM3.so` built from this — rebuild with
+  `make ORB_SLAM3` after any change here.
 - Capture output: `/mnt/ssd/live_e2e/` (bags, trajectory.tum, etc. — a fresh directory per
-  session is recommended).
+  session is recommended). `baseline_walk/walk_bag` is the repeatable-comparison baseline
+  (215s indoor walk, may have dropped images — treat as a reference only).
 
 ## Related docs
 
@@ -242,6 +292,8 @@ duplicated here. If you need more detailed background (why each step does what i
 - [bridge-node.md](bridge-node.md) — bridge node setup/running/verification
 - [euroc-validation.md](euroc-validation.md) — EuRoC-based SLAM node validation (#3)
 - [live-e2e-validation.md](live-e2e-validation.md) — full record of live e2e validation (#7)
+- [imu-init-debug.md](imu-init-debug.md) — root-cause procedure/evidence for IMU init never
+  reaching VIBA1
 - [tx2-build-notes.md](tx2-build-notes.md) — TX2 build environment notes
 - `docs/adr/` — design decisions (timestamp basis, adopting ROS2 Foxy, no adapter layer, SLAM
   wrapper choice)
