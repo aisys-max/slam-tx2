@@ -46,13 +46,75 @@ array.array)`)를 타게 된다. iPhone에 Wi-Fi 직결로 라이브 검증: `/c
 ~5.8Hz → **~27.3Hz**로, 브리지 노드 CPU가 95~100% → **~13~16%**로 개선됐고, `/imu`도
 (불균일하던 50~69Hz → ~97Hz로) 회귀 없이 함께 좋아졌다.
 
+**라이브 재검증 세션 (2026-09-20, 진행 중)** — 위 항목대로 전체 RViz 라이브 확인을 다시
+돌렸다. 그 과정에서 실제 문제 여러 개를 더 찾아 고쳤지만, 이 글을 쓰는 시점까지
+**`/orb_slam3/trajectory`가 라이브에서 Path를 성공적으로 그린 적은 아직 없다** — IMU
+초기화가 완료되기 전에 계속 실패/리셋된다. 지금까지 배제/수정된 것들:
+
+- **TX2가 `MAXP_CORE_ARM` 전력 모드였다** (6코어 중 4코어만 온라인, ~2.0GHz 상한),
+  `MAXN`이 아니었다. 전환(`sudo nvpmodel -m 0 && sudo jetson_clocks`) 후 SLAM+RViz까지 다
+  띄운 상태에서 `/camera/image_raw`가 ~6~8Hz → ~24~30Hz로 회복됐다. **재부팅하면 이 설정은
+  유지되지 않는다** — 재부팅 후 프레임레이트가 다시 낮으면 재적용할 것.
+- **벤더링된 업스트림 ORB-SLAM3에서 실제 크래시 버그 2개를 찾아 패치했다** (이 저장소도
+  `aisys-max/ORB_SLAM3_ROS2`도 아니라, `/mnt/ssd/orb_slam3_stack/ORB_SLAM3` — `UZ-SLAMLab/ORB_SLAM3`를
+  포크 없이 그냥 클론해둔 별도 디렉터리를 로컬에서만 패치하고 `lib/libORB_SLAM3.so`를
+  리빌드한 것). **이 패치는 어디에도 커밋돼 있지 않아서 이 디렉터리가 리셋/재클론되면
+  사라진다** — 아래 "다음에 할 만한 일" 참고, 제대로 된 포크가 필요하다.
+  1. `Optimizer::PoseInertialOptimizationLastFrame`(`src/Optimizer.cc`)가 `pFp->mpcpi`가
+     null인데도 `EdgePriorPoseImu(pFp->mpcpi)`를 그대로 생성했다 (기존 코드가 이미 null을
+     감지해서 `"pFp->mpcpi does not exist!!!"`를 로그로 남기긴 했지만, 그러고도 null
+     포인터를 그대로 넘겼다) — `EdgePriorPoseImu` 생성자가 조건 없이 역참조해서 세그폴트.
+     `scale too small` IMU 초기화 실패가 반복된 몇 초 뒤 안정적으로 재현됐다. null이면 그
+     엣지(와 나중의 `GetHessian()` 사용)를 건너뛰도록 수정.
+  2. `LocalMapping::InitializeIMU`의 중력 정렬 단계(`src/LocalMapping.cc`,
+     `Sophus::SO3f::exp(v*ang/nv)`로 `Rwg` 계산)가 `nv = cross(gI, dirG).norm()`로 나누는데,
+     추정된 중력 방향이 기준 축과 (거의) 평행/역평행이면 이 값이 (거의) 0이 된다 — 실제로
+     자주 벌어지는 경우다, 폰을 수평으로 들면 중력 추정치가 정확히 그 지점 근처로 나오기
+     때문. 그 결과 NaN이 생기고, 나중에 `Sophus::SO3::exp` 자체의 내부 assertion에서
+     크래시했다(`"SO3::exp failed! omega: -nan -nan -nan"`). `nv`가 `1e-6f` 미만이면
+     (정렬돼 있으면 단위행렬, 역정렬이면 고정된 180도 회전으로) 특수 처리하도록 수정,
+     0에 가까운 값으로 나누지 않게 했다.
+- **`config/monocular-inertial/iPhoneXsMax.yaml`의 튜닝값이 낡아있었다**, 전부 갱신:
+  `Camera.fps` 10.0→25.0 (#10 수정 전 ~5.9Hz 현실에 맞춰뒀던 값 — 이제 실측 ~24~30Hz와
+  2~3배 차이나서 ORB-SLAM3 내부 타이밍 휴리스틱을 어긋나게 하고 있었음),
+  `ORBextractor.nFeatures` 1000→1500 (`TRACK_REF_KF: Less than 15 matches!!`가 초반 리셋을
+  유발하는 게 관찰됨), `ORBextractor.iniThFAST` 20→12 (맵 포인트 개수가 특징점 상한보다
+  계속 훨씬 적게(1500개 중 80~300개) 잡혔음 — 실내 저조도 때문으로 추정, 임계값을 낮추니
+  포인트 수가 최대 ~365개까지 측정 가능한 수준으로 늘어남).
+- **오래 유지된 브리지 노드 TCP 연결이 느려진다**: 수십 분 지나면 Wi-Fi 신호가 좋아도 RTT가
+  부풀고(25ms → 100~200ms) 처리량이 무너지며, 브리지 프로세스가 완전히 멈춘 적도 한 번
+  있었다(커널 소켓 버퍼에 `Recv-Q`가 안 읽힌 채 쌓임). 새로 연결하면(브리지 kill 후 재시작)
+  속도가 확실히 회복된다 — TCP 혼잡 제어 이력이 손에 들고 다니는 폰의 실제 Wi-Fi 끊김과
+  겹쳐 누적되는 것으로 추정(장기 해결책은 아래 "다음에 할 만한 일" 참고).
+- **iOS 앱에 Start/Stop 캡처 버튼 추가** ([#19](https://github.com/aisys-max/slam-tx2/pull/19),
+  `ios/SlamCapture/`) — 시험 전/후 이동·대기 동작이 데이터에 섞이지 않도록. 카메라/IMU
+  하드웨어와 TCP 리스닝은 앱 실행 시 자동으로 켜지지만, Start를 눌러야 TX2로 실제 전송이
+  시작된다.
+
+위 항목들 중 어느 것도 단독으로 라이브 초기화 실패를 완전히 해소하지 못했다. 남은 실패
+패턴은 `Fail to track local map!`(보통 맵이 IMU 초기화를 시도하는 문턱인 키프레임 10개/2초에
+도달하기도 전), `scale too small`(IMU 초기화는 시도됐지만 visual-inertial 스케일 추정치가
+degenerate하게 나옴), 가끔 `Not enough motion for initializing`/`bad imu flag` 사이를 오간다.
+이제는 단일 버그가 남은 게 아니라, 작고 적당히 어두운 실내 공간에서 손에 든 폰으로 하는
+ORB-SLAM3 mono-inertial 콜드스타트 자체가 원래 이 정도로 예민한 것일 수 있다 — "다음에 할
+만한 일" 참고.
+
 ## 다음에 할 만한 일
 
-1. **#10 수정 후 전체 라이브 SLAM 세션 재검증** — #15의 남은 트래킹 불안정(리셋,
-   `Fail to track local map!`)이 브리지 노드 프레임레이트에 달려 있다는 가설이 있었다.
-   `/camera/image_raw`가 이제 목표치(20~30Hz)에 근접하므로, [README.md](../README.md)의
-   RViz 라이브 확인 절차를 다시 돌려서 이 불안정이 얼마나 해소됐는지 확인할 가치가 있다.
-2. **차량 실측 / 17 Pro Max + LiDAR 확장** — #1 스펙의 Out of Scope에 명시된 다음 단계.
+1. **`UZ-SLAMLab/ORB_SLAM3`를 포크하거나(또는 `aisys-max/ORB_SLAM3_ROS2` 빌드가 벤더링하도록
+   해서) 위 크래시 수정 2개를 영속화할 것** — 지금은 `/mnt/ssd/orb_slam3_stack/ORB_SLAM3`(업스트림을
+   포크 없이 그냥 클론한 것)에 커밋 안 된 로컬 수정으로만 존재한다. 이 디렉터리가
+   리셋되거나 재클론되면 두 크래시가 조용히 되살아난다. 이 빌드를 다시 누군가 쓰기 전에
+   최우선으로 처리할 것.
+2. **라이브 IMU 초기화를 한 번이라도 끝까지 성공시키고 그 조건을 기록할 것** — 2026-09-20
+   세션의 모든 시도가 MAXN, 크래시 수정 2개, 위 YAML 재튜닝에도 불구하고 실패했다. 시도해볼
+   것: 더 확실한 연속 동작(시도 사이사이 멈춰서 확인받는 대화형 패턴 자체가 IMU 초기화에
+   필요한 연속 트래킹 구간을 계속 깨고 있었을 수 있다), 더 밝고 무늬가 많은 방, 짧게
+   끊어서가 아니라 30초 이상 끊김 없이 걷기.
+3. **오래 유지된 브리지 TCP 연결이 느려지는 문제를 더 파볼 것** (위 참고) — 재연결로
+   우회는 되지만 진짜 해결책은 아니다. 주기적으로 선제적 재연결을 하거나,
+   `TCP_NODELAY`/소켓 버퍼 튜닝이 도움되는지 확인해볼 가치가 있다.
+4. **차량 실측 / 17 Pro Max + LiDAR 확장** — #1 스펙의 Out of Scope에 명시된 다음 단계.
    토픽 기반 구조라 `sensor_msgs/PointCloud2` 추가만으로 확장 가능하도록 설계되어 있다
    (설계 의도만 있고 구현은 없음). #10 수정 후 트래킹이 안정적임을 확인한 뒤 진행하는 게
    순서상 맞을 것.
@@ -97,6 +159,17 @@ array.array)`)를 타게 된다. iPhone에 Wi-Fi 직결로 라이브 검증: `/c
 10. **`ros2 topic hz`는 best-effort 발행자와 QoS가 안 맞아 빈 값만 나올 수 있다.** 실제
    프레임레이트 확인은 `--qos-reliability`류 옵션이 없는 ROS2 Foxy에서는 별도 rclpy
    스크립트(best-effort QoS로 직접 구독)로 잴 것.
+11. **TX2 전력 모드는 재부팅하면 유지되지 않는다.** 재부팅 후 프레임레이트가 이유 없이
+   낮으면 `nvpmodel -q`부터 확인할 것 — `MAXP_CORE_ARM`(4코어)로 돌아가 있을 수 있다.
+   `sudo nvpmodel -m 0 && sudo jetson_clocks`로 `MAXN`(6코어, 최대 클럭) 적용. MAXN으로
+   오래 돌릴 땐 온도도 같이 볼 것(`cat /sys/devices/virtual/thermal/thermal_zone*/temp`) —
+   팬이 응답하도록 설정 안 돼 있을 수 있다(`nvpmodel`이 `fan mode is not set!` 경고를 낸다).
+12. **`/mnt/ssd/orb_slam3_stack/ORB_SLAM3`(벤더링된 업스트림 ORB-SLAM3)에 커밋 안 된 로컬
+   크래시 수정 2개가 있다** (`Optimizer.cc`의 null 포인터 세그폴트, `LocalMapping.cc`의 NaN
+   크래시 — 위 2026-09-20 세션 기록 참고). `UZ-SLAMLab/ORB_SLAM3`를 포크 없이 그냥 클론한
+   것이라 이 변경을 추적하는 게 아무것도 없다 — 디렉터리가 리셋/재클론되면 두 크래시가
+   조용히 되살아난다. 거기서 뭔가 바꾸면 `libORB_SLAM3.so`를 반드시 리빌드할 것
+   (`cd .../ORB_SLAM3/build && make ORB_SLAM3`).
 
 ## 저장소/환경 구조
 

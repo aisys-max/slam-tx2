@@ -54,14 +54,77 @@ against the iPhone over Wi-Fi direct: `/camera/image_raw` went from ~5.8Hz to **
 node CPU dropped from 95-100% to **~13-16%**, and `/imu` improved too (~97Hz, up from an uneven
 50-69Hz) with no regression.
 
+**Live re-verification session (2026-09-20, in progress)** — re-ran the full RViz live-check per
+the item above. Found and fixed several more real issues along the way, but as of this writing
+**`/orb_slam3/trajectory` still hasn't successfully drawn a Path live** — IMU initialization keeps
+failing/resetting before completing. What's been ruled out/fixed so far:
+
+- **TX2 was in `MAXP_CORE_ARM` power mode** (only 4 of 6 cores online, ~2.0GHz cap) instead of
+  `MAXN`. Switching (`sudo nvpmodel -m 0 && sudo jetson_clocks`) took `/camera/image_raw` from
+  ~6-8Hz back up to ~24-30Hz under full SLAM+RViz load. **This does not persist across reboot** —
+  re-apply it if a fresh boot regresses frame rate again.
+- **Two real crash bugs found and patched in the vendored upstream ORB-SLAM3** (NOT this repo or
+  `aisys-max/ORB_SLAM3_ROS2` — a separate, unforked clone of `UZ-SLAMLab/ORB_SLAM3` at
+  `/mnt/ssd/orb_slam3_stack/ORB_SLAM3`, patched locally only and rebuilt into `lib/libORB_SLAM3.so`).
+  **These patches are not committed anywhere and will be lost if that directory is
+  reset/re-cloned** — see "What's worth doing next" below, this needs a proper fork.
+  1. `Optimizer::PoseInertialOptimizationLastFrame` (`src/Optimizer.cc`) constructed
+     `EdgePriorPoseImu(pFp->mpcpi)` even when `pFp->mpcpi` is null (the existing code already
+     detected this and logged `"pFp->mpcpi does not exist!!!"`, but passed the null pointer in
+     anyway) — `EdgePriorPoseImu`'s constructor dereferences it unconditionally, segfaulting.
+     This reproduced reliably a few seconds after repeated `scale too small` IMU-init failures.
+     Fixed by skipping the edge (and its later `GetHessian()` use) when the pointer is null.
+  2. `LocalMapping::InitializeIMU`'s gravity-alignment step (`src/LocalMapping.cc`, computing
+     `Rwg` via `Sophus::SO3f::exp(v*ang/nv)`) divides by `nv = cross(gI, dirG).norm()`, which is
+     (near-)zero whenever the estimated gravity direction is (near-)parallel or antiparallel to
+     the reference axis — a real case, since a levelly-held phone's gravity estimate often lands
+     right there. That produces NaN, which crashed the process later inside
+     `Sophus::SO3::exp`'s own internal assertion (`"SO3::exp failed! omega: -nan -nan -nan"`).
+     Fixed by special-casing `nv` below `1e-6f` (identity if aligned, a fixed 180° rotation if
+     antiparallel) instead of dividing by ~0.
+- **`config/monocular-inertial/iPhoneXsMax.yaml` had stale/suboptimal tuning**, all updated:
+  `Camera.fps` 10.0→25.0 (was set for the pre-#10-fix ~5.9Hz reality, now 2-3x off from the
+  actual ~24-30Hz and skewing ORB-SLAM3's internal timing heuristics), `ORBextractor.nFeatures`
+  1000→1500 (`TRACK_REF_KF: Less than 15 matches!!` was observed causing early resets),
+  `ORBextractor.iniThFAST` 20→12 (map point counts were consistently well under the feature cap,
+  ~80-300 of 1500 — likely under-lit indoor scenes; the lower threshold measurably increased
+  point counts, up to ~365).
+- **Long-lived bridge node TCP connections degrade**: after tens of minutes, RTT balloons
+  (25ms → 100-200ms) and throughput collapses even with good Wi-Fi signal, and the bridge process
+  has been observed to fully stall (`Recv-Q` backing up in the kernel socket buffer, unread) once.
+  A fresh reconnect (kill + restart `ios_bridge_node.py`) reliably restores full speed - suspected
+  TCP congestion-control history compounding with real Wi-Fi hiccups from a hand-carried phone
+  (see "What's worth doing next" for a longer-term fix).
+- **Added a Start/Stop capture button to the iOS app** ([#19](https://github.com/aisys-max/slam-tx2/pull/19),
+  `ios/SlamCapture/`) so a test run's data isn't polluted by setup/idle motion before and after —
+  camera/IMU hardware and the TCP listener still start automatically on launch, but nothing is
+  sent to the TX2 until Start is tapped.
+
+None of the above have fully resolved the live initialization failure by themselves. The
+remaining failure modes cycle between `Fail to track local map!` (usually before the map even
+reaches the 10-keyframe/2s threshold to attempt IMU init), `scale too small` (IMU init attempted
+but the visual-inertial scale estimate came out degenerate), and occasionally `Not enough motion
+for initializing` / `bad imu flag`. This now looks like it may just be inherent brittleness in
+ORB-SLAM3's mono-inertial cold-start in a small, moderately-lit indoor space with a hand-held
+phone, rather than a single remaining bug — see "What's worth doing next".
+
 ## What's worth doing next
 
-1. **Re-validate full live SLAM session now that #10 is fixed** — #15's remaining
-   tracking-instability (resets, `Fail to track local map!`) was hypothesized to hinge on the
-   bridge node's frame rate; worth re-running the full RViz live-check procedure
-   ([README.md](../README.md)) now that `/camera/image_raw` runs near the 20-30Hz target, to see
-   how much of that instability it resolves.
-2. **Vehicle field testing / 17 Pro Max + LiDAR expansion** — the next stage explicitly listed
+1. **Fork `UZ-SLAMLab/ORB_SLAM3` (or patch `aisys-max/ORB_SLAM3_ROS2`'s build to vendor it) to
+   persist the two crash fixes above** — right now they only exist as uncommitted local edits in
+   `/mnt/ssd/orb_slam3_stack/ORB_SLAM3`, a plain clone of upstream with no fork/remote of our own.
+   Any reset of that directory silently reintroduces both crashes. Top priority before anyone
+   relies on this build again.
+2. **Get one successful live IMU initialization end-to-end and capture what conditions produced
+   it** — none of the 2026-09-20 session's attempts succeeded despite MAXN, both crash fixes, and
+   the YAML retuning above. Try: more deliberate motion (continuous, not stop-and-check-in
+   between attempts — the conversational back-and-forth of a live debugging session may itself
+   have been breaking up the continuous good-tracking window IMU init needs), a brighter/more
+   textured room, or eventually a longer uninterrupted walk (30s+) rather than short bursts.
+3. **Investigate the long-lived bridge TCP connection degradation** (see above) — reconnecting
+   works around it but isn't a real fix. Possibly worth a periodic proactive reconnect, or
+   investigating whether `TCP_NODELAY`/socket buffer tuning helps.
+4. **Vehicle field testing / 17 Pro Max + LiDAR expansion** — the next stage explicitly listed
    as Out of Scope in the #1 spec. Designed to be extensible just by adding
    `sensor_msgs/PointCloud2`, since it's topic-based (design intent only, not implemented). Makes
    sense to sequence this after tracking is confirmed stable post-#10.
@@ -111,6 +174,17 @@ duplicated here. If you need more detailed background (why each step does what i
    best-effort publisher, so on ROS2 Foxy (which has no `--qos-reliability`-style option),
    measure actual frame rate with a separate rclpy script that subscribes with best-effort QoS
    directly instead.
+11. **TX2 power mode doesn't persist across reboot.** If frame rate is inexplicably low again
+   after a reboot, check `nvpmodel -q` — it may have reverted to `MAXP_CORE_ARM` (4 cores). Run
+   `sudo nvpmodel -m 0 && sudo jetson_clocks` for `MAXN` (6 cores, max clocks). Watch temps
+   (`cat /sys/devices/virtual/thermal/thermal_zone*/temp`) if running MAXN for a long session —
+   the fan may not have been configured to respond (`nvpmodel` warns `fan mode is not set!`).
+12. **The vendored upstream ORB-SLAM3 at `/mnt/ssd/orb_slam3_stack/ORB_SLAM3` has two local,
+   uncommitted crash fixes** (null-pointer segfault in `Optimizer.cc`, NaN crash in
+   `LocalMapping.cc` — see the 2026-09-20 session notes above). It's a plain clone of
+   `UZ-SLAMLab/ORB_SLAM3`, not a fork, so nothing tracks these changes — if the directory gets
+   reset or re-cloned, both crashes come back silently. `libORB_SLAM3.so` must be rebuilt
+   (`cd .../ORB_SLAM3/build && make ORB_SLAM3`) after any change there.
 
 ## Repo/environment layout
 
