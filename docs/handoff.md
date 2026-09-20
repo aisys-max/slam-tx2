@@ -82,6 +82,13 @@ failing/resetting before completing. What's been ruled out/fixed so far:
      `Sophus::SO3::exp`'s own internal assertion (`"SO3::exp failed! omega: -nan -nan -nan"`).
      Fixed by special-casing `nv` below `1e-6f` (identity if aligned, a fixed 180° rotation if
      antiparallel) instead of dividing by ~0.
+  3. Same `SO3::exp` NaN crash recurred from a **different** call site after fix #2 above:
+     `Preintegrated::GetDeltaRotation()`/`GetUpdatedDeltaRotation()` (`src/ImuTypes.cc`) compute
+     `Sophus::SO3f::exp(JRg * dbg)` (a gyro-bias correction) with no NaN guard — a degenerate/failed
+     optimization (repeated `scale too small`) can leave a KeyFrame's bias estimate NaN-contaminated,
+     which then reaches this unrelated code path on a later frame and crashes the same assertion.
+     Fixed by checking `.allFinite()` on the rotation vector before calling `exp()`, falling back to
+     no bias correction (zero vector) if NaN.
 - **`config/monocular-inertial/iPhoneXsMax.yaml` had stale/suboptimal tuning**, all updated:
   `Camera.fps` 10.0→25.0 (was set for the pre-#10-fix ~5.9Hz reality, now 2-3x off from the
   actual ~24-30Hz and skewing ORB-SLAM3's internal timing heuristics), `ORBextractor.nFeatures`
@@ -96,35 +103,56 @@ failing/resetting before completing. What's been ruled out/fixed so far:
   TCP congestion-control history compounding with real Wi-Fi hiccups from a hand-carried phone
   (see "What's worth doing next" for a longer-term fix).
 - **Added a Start/Stop capture button to the iOS app** ([#19](https://github.com/aisys-max/slam-tx2/pull/19),
-  `ios/SlamCapture/`) so a test run's data isn't polluted by setup/idle motion before and after —
-  camera/IMU hardware and the TCP listener still start automatically on launch, but nothing is
-  sent to the TX2 until Start is tapped.
+  merged, `ios/SlamCapture/`) so a test run's data isn't polluted by setup/idle motion before and
+  after — camera/IMU hardware and the TCP listener still start automatically on launch, but
+  nothing is sent to the TX2 until Start is tapped.
+- **Root filesystem filled to 100% (`/`, `mmcblk0p1`) mid-session**, from `/var/lib/apport/coredump/`
+  accumulating ~1GB core dumps from each of the mono-inertial crashes above (`ulimit -c unlimited`
+  was set to capture them for gdb). This silently breaks tool output capture/shell commands with
+  no obvious error pointing at disk space. Cleaned up (see sticking point below) — freed back to
+  ~3.8GB available. If tools start failing with odd "output lost"/`ENOSPC`-flavored errors again,
+  check `df -h /` first.
+- **Found a new, unexplained failure mode: the SLAM node process survives but its ROS2 node
+  disappears** — `ros2 node list` stops showing it, `/orb_slam3/trajectory`'s publisher count and
+  `/camera/image_raw`'s subscriber count both drop to 0, and the process's CPU usage flatlines
+  (near-zero `utime`/`stime` deltas in `/proc/<pid>/stat` over several seconds) while the raw OS
+  process is still alive (not a zombie in the `ps` sense, still multi-threaded and running). Not
+  yet root-caused — would need a fresh gdb-attached repro to catch. Killing and restarting the
+  SLAM node is the only known workaround so far.
 
 None of the above have fully resolved the live initialization failure by themselves. The
 remaining failure modes cycle between `Fail to track local map!` (usually before the map even
 reaches the 10-keyframe/2s threshold to attempt IMU init), `scale too small` (IMU init attempted
-but the visual-inertial scale estimate came out degenerate), and occasionally `Not enough motion
-for initializing` / `bad imu flag`. This now looks like it may just be inherent brittleness in
-ORB-SLAM3's mono-inertial cold-start in a small, moderately-lit indoor space with a hand-held
-phone, rather than a single remaining bug — see "What's worth doing next".
+but the visual-inertial scale estimate came out degenerate), occasionally `Not enough motion
+for initializing` / `bad imu flag`, and now the "node disappears" issue above. This now looks
+like it may be a mix of inherent brittleness in ORB-SLAM3's mono-inertial cold-start in a small,
+moderately-lit indoor space with a hand-held phone, plus at least one more real bug still to
+find — see "What's worth doing next". **As of this writing, no attempt in the 2026-09-20 session
+has successfully drawn a live Path in RViz.**
 
 ## What's worth doing next
 
-1. **Fork `UZ-SLAMLab/ORB_SLAM3` (or patch `aisys-max/ORB_SLAM3_ROS2`'s build to vendor it) to
-   persist the two crash fixes above** — right now they only exist as uncommitted local edits in
+1. **Root-cause the "SLAM node disappears from the ROS2 graph" issue above** — this is the
+   current blocker on top of everything else being fixed. Repro under gdb (like the two earlier
+   crashes were caught) to get a real backtrace of whichever thread is dying; the working
+   hypothesis is an uncaught C++ exception unwinding and destroying the rclcpp node/System object
+   on the main thread without terminating the process, but that's unconfirmed.
+2. **Fork `UZ-SLAMLab/ORB_SLAM3` (or patch `aisys-max/ORB_SLAM3_ROS2`'s build to vendor it) to
+   persist the three crash fixes above** — right now they only exist as uncommitted local edits in
    `/mnt/ssd/orb_slam3_stack/ORB_SLAM3`, a plain clone of upstream with no fork/remote of our own.
-   Any reset of that directory silently reintroduces both crashes. Top priority before anyone
-   relies on this build again.
-2. **Get one successful live IMU initialization end-to-end and capture what conditions produced
-   it** — none of the 2026-09-20 session's attempts succeeded despite MAXN, both crash fixes, and
-   the YAML retuning above. Try: more deliberate motion (continuous, not stop-and-check-in
+   Any reset of that directory silently reintroduces all three crashes. Do this before anyone
+   relies on this build again, and before debugging item 1 above eats more disk via core dumps
+   (see the disk-space sticking point below).
+3. **Get one successful live IMU initialization end-to-end and capture what conditions produced
+   it** — none of the 2026-09-20 session's attempts succeeded despite MAXN, all three crash fixes,
+   and the YAML retuning above. Try: more deliberate motion (continuous, not stop-and-check-in
    between attempts — the conversational back-and-forth of a live debugging session may itself
    have been breaking up the continuous good-tracking window IMU init needs), a brighter/more
    textured room, or eventually a longer uninterrupted walk (30s+) rather than short bursts.
-3. **Investigate the long-lived bridge TCP connection degradation** (see above) — reconnecting
+4. **Investigate the long-lived bridge TCP connection degradation** (see above) — reconnecting
    works around it but isn't a real fix. Possibly worth a periodic proactive reconnect, or
    investigating whether `TCP_NODELAY`/socket buffer tuning helps.
-4. **Vehicle field testing / 17 Pro Max + LiDAR expansion** — the next stage explicitly listed
+5. **Vehicle field testing / 17 Pro Max + LiDAR expansion** — the next stage explicitly listed
    as Out of Scope in the #1 spec. Designed to be extensible just by adding
    `sensor_msgs/PointCloud2`, since it's topic-based (design intent only, not implemented). Makes
    sense to sequence this after tracking is confirmed stable post-#10.
@@ -179,12 +207,20 @@ duplicated here. If you need more detailed background (why each step does what i
    `sudo nvpmodel -m 0 && sudo jetson_clocks` for `MAXN` (6 cores, max clocks). Watch temps
    (`cat /sys/devices/virtual/thermal/thermal_zone*/temp`) if running MAXN for a long session —
    the fan may not have been configured to respond (`nvpmodel` warns `fan mode is not set!`).
-12. **The vendored upstream ORB-SLAM3 at `/mnt/ssd/orb_slam3_stack/ORB_SLAM3` has two local,
-   uncommitted crash fixes** (null-pointer segfault in `Optimizer.cc`, NaN crash in
-   `LocalMapping.cc` — see the 2026-09-20 session notes above). It's a plain clone of
-   `UZ-SLAMLab/ORB_SLAM3`, not a fork, so nothing tracks these changes — if the directory gets
-   reset or re-cloned, both crashes come back silently. `libORB_SLAM3.so` must be rebuilt
-   (`cd .../ORB_SLAM3/build && make ORB_SLAM3`) after any change there.
+12. **The vendored upstream ORB-SLAM3 at `/mnt/ssd/orb_slam3_stack/ORB_SLAM3` has three local,
+   uncommitted crash fixes** (null-pointer segfault in `Optimizer.cc`, two NaN crashes in
+   `LocalMapping.cc` and `ImuTypes.cc` — see the 2026-09-20 session notes above). It's a plain
+   clone of `UZ-SLAMLab/ORB_SLAM3`, not a fork, so nothing tracks these changes — if the directory
+   gets reset or re-cloned, all three crashes come back silently. `libORB_SLAM3.so` must be
+   rebuilt (`cd .../ORB_SLAM3/build && make ORB_SLAM3`) after any change there.
+13. **`ulimit -c unlimited` + a crashing process on this TX2 fills the root filesystem fast.**
+   Each mono-inertial crash left a ~1GB core dump in `/var/lib/apport/coredump/` (needs
+   `sudo rm` to clear, owned by root). The root partition is only 28G and was already tight
+   (~360MB free) before this session even started, so a handful of crashes is enough to hit
+   `ENOSPC` and break tool output/shell commands with no obvious disk-related error message. If
+   commands start failing strangely, check `df -h /` before anything else. Safe-to-clear
+   candidates if it fills again: `/var/lib/apport/coredump/`, `~/.cache/uv`, `~/.cache/pip` (all
+   regenerate on demand).
 
 ## Repo/environment layout
 

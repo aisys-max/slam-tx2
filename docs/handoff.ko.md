@@ -74,6 +74,13 @@ array.array)`)를 타게 된다. iPhone에 Wi-Fi 직결로 라이브 검증: `/c
      크래시했다(`"SO3::exp failed! omega: -nan -nan -nan"`). `nv`가 `1e-6f` 미만이면
      (정렬돼 있으면 단위행렬, 역정렬이면 고정된 180도 회전으로) 특수 처리하도록 수정,
      0에 가까운 값으로 나누지 않게 했다.
+  3. 위 수정 #2 이후, **다른** 호출 지점에서 같은 `SO3::exp` NaN 크래시가 재발했다:
+     `Preintegrated::GetDeltaRotation()`/`GetUpdatedDeltaRotation()`(`src/ImuTypes.cc`)가
+     `Sophus::SO3f::exp(JRg * dbg)`(자이로 바이어스 보정)를 NaN 가드 없이 계산한다 —
+     degenerate/실패한 최적화(`scale too small` 반복)가 어떤 키프레임의 바이어스 추정치를
+     NaN으로 오염시켜 놓으면, 나중 프레임에서 이 무관한 코드 경로를 타면서 같은 assertion으로
+     크래시했다. 회전 벡터를 `exp()`에 넘기기 전에 `.allFinite()`를 확인해, NaN이면 바이어스
+     보정 없음(0 벡터)으로 대체하도록 수정.
 - **`config/monocular-inertial/iPhoneXsMax.yaml`의 튜닝값이 낡아있었다**, 전부 갱신:
   `Camera.fps` 10.0→25.0 (#10 수정 전 ~5.9Hz 현실에 맞춰뒀던 값 — 이제 실측 ~24~30Hz와
   2~3배 차이나서 ORB-SLAM3 내부 타이밍 휴리스틱을 어긋나게 하고 있었음),
@@ -87,34 +94,54 @@ array.array)`)를 타게 된다. iPhone에 Wi-Fi 직결로 라이브 검증: `/c
   속도가 확실히 회복된다 — TCP 혼잡 제어 이력이 손에 들고 다니는 폰의 실제 Wi-Fi 끊김과
   겹쳐 누적되는 것으로 추정(장기 해결책은 아래 "다음에 할 만한 일" 참고).
 - **iOS 앱에 Start/Stop 캡처 버튼 추가** ([#19](https://github.com/aisys-max/slam-tx2/pull/19),
-  `ios/SlamCapture/`) — 시험 전/후 이동·대기 동작이 데이터에 섞이지 않도록. 카메라/IMU
+  머지됨, `ios/SlamCapture/`) — 시험 전/후 이동·대기 동작이 데이터에 섞이지 않도록. 카메라/IMU
   하드웨어와 TCP 리스닝은 앱 실행 시 자동으로 켜지지만, Start를 눌러야 TX2로 실제 전송이
   시작된다.
+- **세션 도중 root 파일시스템(`/`, `mmcblk0p1`)이 100% 찼다** — 위 mono-inertial 크래시마다
+  `/var/lib/apport/coredump/`에 ~1GB짜리 코어덤프가 쌓인 게 원인(gdb로 잡으려고
+  `ulimit -c unlimited`를 켜뒀었음). 이러면 디스크 관련 에러 메시지 없이 도구 출력/셸
+  명령이 조용히 실패한다. 정리 완료(아래 자주 막히는 지점 참고) — 약 3.8GB 여유로 복구.
+  또 이런 "output lost"/`ENOSPC` 느낌의 이상한 에러가 나면 `df -h /`부터 확인할 것.
+- **새로 확인된, 아직 원인 불명인 실패 패턴: SLAM 프로세스는 살아있는데 ROS2 노드가 사라짐** —
+  `ros2 node list`에 더 이상 안 뜨고, `/orb_slam3/trajectory`의 publisher 수와
+  `/camera/image_raw`의 subscriber 수가 둘 다 0이 되고, 프로세스 CPU 사용량이 완전히
+  평평해진다(`/proc/<pid>/stat`의 `utime`/`stime`이 몇 초 동안 거의 안 늘어남) — 그런데 OS
+  프로세스 자체는 살아있다(`ps`상 좀비가 아니고, 여전히 멀티스레드로 실행 중). 아직 근본
+  원인을 못 잡았다 — gdb를 붙인 채로 재현해야 확인 가능할 듯. 지금은 SLAM 노드를 죽이고
+  재시작하는 것만이 알려진 우회법이다.
 
 위 항목들 중 어느 것도 단독으로 라이브 초기화 실패를 완전히 해소하지 못했다. 남은 실패
 패턴은 `Fail to track local map!`(보통 맵이 IMU 초기화를 시도하는 문턱인 키프레임 10개/2초에
 도달하기도 전), `scale too small`(IMU 초기화는 시도됐지만 visual-inertial 스케일 추정치가
-degenerate하게 나옴), 가끔 `Not enough motion for initializing`/`bad imu flag` 사이를 오간다.
-이제는 단일 버그가 남은 게 아니라, 작고 적당히 어두운 실내 공간에서 손에 든 폰으로 하는
-ORB-SLAM3 mono-inertial 콜드스타트 자체가 원래 이 정도로 예민한 것일 수 있다 — "다음에 할
-만한 일" 참고.
+degenerate하게 나옴), 가끔 `Not enough motion for initializing`/`bad imu flag`, 그리고 이제
+위의 "노드가 사라짐" 문제 사이를 오간다. 이제는 단일 버그가 남은 게 아니라, 작고 적당히
+어두운 실내 공간에서 손에 든 폰으로 하는 ORB-SLAM3 mono-inertial 콜드스타트 자체의 원래
+예민함과, 아직 못 찾은 버그가 최소 하나 더 섞여있는 것일 수 있다 — "다음에 할 만한 일"
+참고. **이 글을 쓰는 시점까지, 2026-09-20 세션의 어떤 시도도 RViz에 라이브로 Path를
+그리는 데 성공하지 못했다.**
 
 ## 다음에 할 만한 일
 
-1. **`UZ-SLAMLab/ORB_SLAM3`를 포크하거나(또는 `aisys-max/ORB_SLAM3_ROS2` 빌드가 벤더링하도록
-   해서) 위 크래시 수정 2개를 영속화할 것** — 지금은 `/mnt/ssd/orb_slam3_stack/ORB_SLAM3`(업스트림을
+1. **위 "SLAM 노드가 ROS2 그래프에서 사라지는" 문제부터 근본 원인을 찾을 것** — 다른 모든
+   수정 위에 남은 현재 블로커다. (앞선 크래시 2개를 잡았던 것처럼) gdb로 재현해서 실제
+   죽는 스레드의 백트레이스를 잡을 것 — 메인 스레드에서 뭔가 uncaught C++ exception이
+   전파되면서 프로세스는 안 죽고 rclcpp 노드/System 객체만 파괴되는 게 유력한 가설이지만
+   확인은 안 됐다.
+2. **`UZ-SLAMLab/ORB_SLAM3`를 포크하거나(또는 `aisys-max/ORB_SLAM3_ROS2` 빌드가 벤더링하도록
+   해서) 위 크래시 수정 3개를 영속화할 것** — 지금은 `/mnt/ssd/orb_slam3_stack/ORB_SLAM3`(업스트림을
    포크 없이 그냥 클론한 것)에 커밋 안 된 로컬 수정으로만 존재한다. 이 디렉터리가
-   리셋되거나 재클론되면 두 크래시가 조용히 되살아난다. 이 빌드를 다시 누군가 쓰기 전에
-   최우선으로 처리할 것.
-2. **라이브 IMU 초기화를 한 번이라도 끝까지 성공시키고 그 조건을 기록할 것** — 2026-09-20
-   세션의 모든 시도가 MAXN, 크래시 수정 2개, 위 YAML 재튜닝에도 불구하고 실패했다. 시도해볼
+   리셋되거나 재클론되면 세 크래시가 조용히 되살아난다. 이 빌드를 다시 누군가 쓰기 전에,
+   그리고 위 1번 디버깅으로 코어덤프가 디스크를 더 잡아먹기 전에(아래 디스크 관련 자주
+   막히는 지점 참고) 처리할 것.
+3. **라이브 IMU 초기화를 한 번이라도 끝까지 성공시키고 그 조건을 기록할 것** — 2026-09-20
+   세션의 모든 시도가 MAXN, 크래시 수정 3개, 위 YAML 재튜닝에도 불구하고 실패했다. 시도해볼
    것: 더 확실한 연속 동작(시도 사이사이 멈춰서 확인받는 대화형 패턴 자체가 IMU 초기화에
    필요한 연속 트래킹 구간을 계속 깨고 있었을 수 있다), 더 밝고 무늬가 많은 방, 짧게
    끊어서가 아니라 30초 이상 끊김 없이 걷기.
-3. **오래 유지된 브리지 TCP 연결이 느려지는 문제를 더 파볼 것** (위 참고) — 재연결로
+4. **오래 유지된 브리지 TCP 연결이 느려지는 문제를 더 파볼 것** (위 참고) — 재연결로
    우회는 되지만 진짜 해결책은 아니다. 주기적으로 선제적 재연결을 하거나,
    `TCP_NODELAY`/소켓 버퍼 튜닝이 도움되는지 확인해볼 가치가 있다.
-4. **차량 실측 / 17 Pro Max + LiDAR 확장** — #1 스펙의 Out of Scope에 명시된 다음 단계.
+5. **차량 실측 / 17 Pro Max + LiDAR 확장** — #1 스펙의 Out of Scope에 명시된 다음 단계.
    토픽 기반 구조라 `sensor_msgs/PointCloud2` 추가만으로 확장 가능하도록 설계되어 있다
    (설계 의도만 있고 구현은 없음). #10 수정 후 트래킹이 안정적임을 확인한 뒤 진행하는 게
    순서상 맞을 것.
@@ -165,11 +192,19 @@ ORB-SLAM3 mono-inertial 콜드스타트 자체가 원래 이 정도로 예민한
    오래 돌릴 땐 온도도 같이 볼 것(`cat /sys/devices/virtual/thermal/thermal_zone*/temp`) —
    팬이 응답하도록 설정 안 돼 있을 수 있다(`nvpmodel`이 `fan mode is not set!` 경고를 낸다).
 12. **`/mnt/ssd/orb_slam3_stack/ORB_SLAM3`(벤더링된 업스트림 ORB-SLAM3)에 커밋 안 된 로컬
-   크래시 수정 2개가 있다** (`Optimizer.cc`의 null 포인터 세그폴트, `LocalMapping.cc`의 NaN
-   크래시 — 위 2026-09-20 세션 기록 참고). `UZ-SLAMLab/ORB_SLAM3`를 포크 없이 그냥 클론한
-   것이라 이 변경을 추적하는 게 아무것도 없다 — 디렉터리가 리셋/재클론되면 두 크래시가
-   조용히 되살아난다. 거기서 뭔가 바꾸면 `libORB_SLAM3.so`를 반드시 리빌드할 것
-   (`cd .../ORB_SLAM3/build && make ORB_SLAM3`).
+   크래시 수정 3개가 있다** (`Optimizer.cc`의 null 포인터 세그폴트, `LocalMapping.cc`와
+   `ImuTypes.cc`의 NaN 크래시 2개 — 위 2026-09-20 세션 기록 참고). `UZ-SLAMLab/ORB_SLAM3`를
+   포크 없이 그냥 클론한 것이라 이 변경을 추적하는 게 아무것도 없다 — 디렉터리가
+   리셋/재클론되면 세 크래시가 조용히 되살아난다. 거기서 뭔가 바꾸면 `libORB_SLAM3.so`를
+   반드시 리빌드할 것 (`cd .../ORB_SLAM3/build && make ORB_SLAM3`).
+13. **`ulimit -c unlimited` 상태에서 프로세스가 크래시하면 이 TX2의 root 파일시스템이
+   금방 찬다.** mono-inertial이 크래시할 때마다 `/var/lib/apport/coredump/`에 ~1GB
+   코어덤프가 남았다(지우려면 `sudo rm` 필요, root 소유). root 파티션이 28G뿐이고 이번
+   세션 시작 전부터 이미 빠듯했어서(~360MB 여유), 크래시 몇 번이면 `ENOSPC`에 걸려 디스크
+   관련이라는 티도 안 나는 이상한 에러로 도구 출력/셸 명령이 깨진다. 명령이 이상하게
+   실패하기 시작하면 무엇보다 먼저 `df -h /`를 확인할 것. 다시 찰 경우 안전하게 지워도
+   되는 후보: `/var/lib/apport/coredump/`, `~/.cache/uv`, `~/.cache/pip` (전부 필요하면
+   재생성됨).
 
 ## 저장소/환경 구조
 
