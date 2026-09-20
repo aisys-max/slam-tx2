@@ -13,6 +13,17 @@ final class CaptureManager: NSObject {
 
     private let onFrame: (Data) -> Void
 
+    // Start/Stop 버튼으로 게이팅: 세션은 계속 돌지만(프리뷰 유지, 재시작 지연 없음),
+    // false인 동안은 onFrame을 호출하지 않아 테스트 구간 앞뒤로 불필요한 데이터가 안 섞인다.
+    // captureOutput 콜백이 항상 videoOutputQueue에서 실행되므로 같은 큐에서 토글하면 락 없이 안전하다.
+    private var isStreaming = false
+
+    func setStreaming(_ streaming: Bool) {
+        videoOutputQueue.async { [weak self] in
+            self?.isStreaming = streaming
+        }
+    }
+
     init(onFrame: @escaping (Data) -> Void) {
         self.onFrame = onFrame
         super.init()
@@ -85,6 +96,7 @@ final class CaptureManager: NSObject {
 
 extension CaptureManager: AVCaptureVideoDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        guard isStreaming else { return }
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
         // presentationTimeStamp는 하드웨어 캡처 시각(콜백 지연 없음) - ADR-0001이 요구하는

@@ -52,9 +52,10 @@ flowchart LR
 ### 0. Prerequisites
 
 - Run the `SlamCapture` app on the iPhone (Wi-Fi direct recommended — faster than USB/iproxy.
-  Find the IP under iPhone Settings → Wi-Fi → connected network → the (i) icon). The app has no
-  button and starts capturing automatically in `onAppear`
-  ([ios/SlamCapture/ContentView.swift](ios/SlamCapture/ContentView.swift)).
+  Find the IP under iPhone Settings → Wi-Fi → connected network → the (i) icon). Camera/IMU
+  hardware and the TCP listener start automatically in `onAppear`, but nothing is sent to the TX2
+  until you tap **Start** — tap **Stop** when the run is done, so pre/post-test idle data doesn't
+  pollute the capture ([ios/SlamCapture/ContentView.swift](ios/SlamCapture/ContentView.swift)).
 - Source ROS2 on the TX2 (do it this way every time — because of the `COLCON_TRACE`
   unbound-variable issue):
   ```bash

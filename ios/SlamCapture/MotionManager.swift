@@ -21,8 +21,18 @@ final class MotionManager {
     private var latestRotationRate: (x: Double, y: Double, z: Double)?
     private let lock = NSLock()
 
+    // Start/Stop 버튼으로 게이팅: CoreMotion 폴링은 계속하되(재시작 지연 없음), false인 동안은
+    // onSample을 호출하지 않는다. 기존 lock으로 함께 보호한다.
+    private var isStreaming = false
+
     init(onSample: @escaping (Data) -> Void) {
         self.onSample = onSample
+    }
+
+    func setStreaming(_ streaming: Bool) {
+        lock.lock()
+        isStreaming = streaming
+        lock.unlock()
     }
 
     func start(updateHz: Double = 200.0) {
@@ -57,8 +67,10 @@ final class MotionManager {
             self.lock.lock()
             self.latestAcceleration = (acc.x, acc.y, acc.z, timestampNs)
             let gyro = self.latestRotationRate
+            let streaming = self.isStreaming
             self.lock.unlock()
 
+            guard streaming else { return }
             guard let gyro = gyro else { return }  // 첫 자이로 샘플이 아직 안 왔으면 건너뜀
             let message = WireProtocol.encodeImu(
                 timestampNs: timestampNs,

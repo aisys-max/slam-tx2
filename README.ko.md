@@ -51,8 +51,10 @@ flowchart LR
 ### 0. 사전 준비
 
 - iPhone에서 `SlamCapture` 앱 실행 (Wi-Fi 직결 권장 — USB/iproxy보다 빠름. iPhone 설정 → Wi-Fi
-  → 연결된 네트워크 (i) 아이콘에서 IP 확인). 앱은 버튼 없이 `onAppear`에서 자동으로 캡처를
-  시작한다 ([ios/SlamCapture/ContentView.swift](ios/SlamCapture/ContentView.swift)).
+  → 연결된 네트워크 (i) 아이콘에서 IP 확인). 카메라/IMU 하드웨어와 TCP 리스닝은 `onAppear`에서
+  자동으로 켜지지만, **Start**를 눌러야 실제로 TX2에 전송되기 시작한다 — 시험이 끝나면
+  **Stop**을 눌러 전/후 대기 시간의 데이터가 섞이지 않게 할 것
+  ([ios/SlamCapture/ContentView.swift](ios/SlamCapture/ContentView.swift)).
 - TX2에서 ROS2 소스 (매번 이렇게 잡을 것 — `COLCON_TRACE` unbound-variable 이슈 때문):
   ```bash
   set +u; source /mnt/ssd/ros2_foxy/install/setup.bash; set -u
