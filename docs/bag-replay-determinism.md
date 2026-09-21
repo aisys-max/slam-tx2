@@ -2,6 +2,11 @@
 
 > 한국어 버전은 [여기](bag-replay-determinism.ko.md)에 있습니다.
 
+**Background**: found during the IMU-init (never reaches VIBA1) root-cause investigation in
+[docs/imu-init-debug.md](imu-init-debug.md) — a threshold experiment (50 vs. 30) meant to be a
+"fair comparison" via replaying the same bag turned out not to reproduce, which led to the
+investigation documented here.
+
 **Problem**: replaying the same bag multiple times with the same `ros2 bag play` produced
 different SLAM tracking outcomes (reset frequency, where it succeeded/failed) every time —
 without changing any code or config. This makes any "before/after" experiment methodology
