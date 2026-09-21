@@ -152,3 +152,57 @@ Step 1 PASS (reset times ≈ reconnect times)
 Step 1 FAIL (reset times unrelated to reconnects)
   → Step 4 → PASS (motion/blur) or FAIL (investigate matching bug in code)
 ```
+
+## Follow-up findings (2026-09-21) - conclusion
+
+Step 5 above (`recv_timeout` relaxation) turned out to be a real partial cause —
+`ios_bridge_node.py`'s `_recv_exact_before_deadline()` had a bug: a fixed deadline for the whole
+message rather than a true idle timeout. Fixed as `_recv_exact_idle_timeout()`, which eliminated
+reconnects entirely at the *default* `--recv-timeout 10.0` (slam-tx2#20, PR #21). But the core
+tracking failure (`Fail to track local map!`, immediately after init) remained unresolved even
+after that. The following were additionally tested/ruled out:
+
+- **Insufficient parallax**: instrumented `TwoViewReconstruction.cc` and measured actual
+  parallax at init time — 1-6.6 degrees, mostly clustered at 1-3. Raising `minParallax` from
+  1.0 to 3.0 accepted only clearly-good inits (3.5-6.2 degrees) but **failed just as
+  immediately** — parallax was not the cause. (Experimental code reverted.)
+- **The real bottleneck is past TrackReferenceKeyFrame, in SearchLocalPoints/reprojection**:
+  instrumentation showed raw matches (`aux1`) were generally plentiful, but post-optimization
+  inliers varied wildly. Notably, one instrumented run tracked **~90 frames continuously with
+  200+ inliers** — solid proof this pipeline/data *can* track well. Right after that, a crash
+  occurred during an actual IMU-init attempt (`scale too small`) — the 4th null-guard bug in
+  `Optimizer.cc` (already fixed/committed, see "Live re-verification session" above). A second
+  gdb repro attempt didn't reproduce it (timing-dependent), but confirmed the 4 existing guards
+  work correctly.
+- **The bag replay itself was non-deterministic (key finding)**: why identical bag replays
+  produced different SLAM outcomes was confirmed by measuring with SLAM entirely out of the
+  loop, using a plain subscriber — best-effort QoS + a shallow queue was silently dropping a
+  different set of messages every replay (image count varied 1182-1184 of 1184 recorded, IMU
+  count varied 16007-16522 of 16525 recorded). Added a `reliable_sensor_qos` parameter to
+  `aisys-max/ORB_SLAM3_ROS2` (live capture stays best-effort by default) to make bag-based
+  comparisons deterministic. See [docs/bag-replay-determinism.md](bag-replay-determinism.md)
+  for details (slam-tx2 PR #21). Even with input confirmed byte-identical, though, SLAM's
+  outcome still varied slightly (42 vs. 43 resets) — the remaining non-determinism is inside
+  ORB-SLAM3's own multi-threaded execution order (not fixed by input data alone).
+
+**An important correction**: the failure hit most often right now (`Fail to track local map!`,
+before IMU init) happens in a **purely vision-based** code path -
+`Optimizer::PoseOptimization()`, taken specifically when `!mpAtlas->isImuInitialized()`. That
+means Tbc/IMU-noise calibration precision (e.g. via Kalibr) is **unrelated to this failure** -
+IMU isn't involved in pose estimation at all at this stage yet. A proper Kalibr calibration
+could only matter *after* IMU initialization actually gets underway, which this setup rarely
+even reaches — making it a low-priority next step.
+
+**Remaining, unverified leading hypothesis**: rolling-shutter distortion. Consistent with the
+observed pattern — raw features, matching, and parallax are all fine, yet the failure is
+specific to the stage requiring precise reprojection consistency. Confirming this requires
+saving frames from the actual moment of failure (right before a reset) and inspecting them for
+geometric skew — not yet done.
+
+**Session conclusion (2026-09-21)**: this session's goal was to understand how the SLAM
+pipeline behaves with the iPhone Xs Max + TX2 combination, not to ship a product on it. Every
+controllable lever (CPU, crashes, network, parallax, transport determinism) was found and either
+fixed or ruled out; what remains (ORB-SLAM3's inherent multi-threaded non-determinism, and
+possibly rolling-shutter distortion) looks like a fundamental characteristic of this hardware
+combination rather than something left to fix in software. Pausing the investigation here. If
+resumed, "confirm the rolling-shutter hypothesis" above is the natural next step.

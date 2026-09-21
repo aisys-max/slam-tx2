@@ -181,30 +181,40 @@ to the failure patterns actually observed in this project). Summary:
   below.
 
 **Summary**: all 4 crash-class bugs found so far have been fixed and persisted to the fork. The
-network-reconnect issue has been root-caused and mitigated with `--recv-timeout 60`. But **the
-core tracking problem (almost never clearing the post-reset 50-inlier gate) remains unresolved**,
-and as of this writing, no attempt in the 2026-09-20 session has successfully drawn a sustained
-live Path in RViz.
+network-reconnect issue was root-caused (a fixed-deadline bug in the bridge) and fully fixed —
+slam-tx2#20, PR #21, 0 reconnects at the default `--recv-timeout 10.0`. Also discovered the bag
+replay itself was non-deterministic and fixed it with `reliable_sensor_qos`
+(`docs/bag-replay-determinism.md`). Insufficient parallax was ruled out by direct measurement.
+But **the core tracking problem (fails almost immediately after every init) was left unresolved
+when the session wrapped up** — see "Follow-up findings (2026-09-21) - conclusion" in
+[docs/imu-init-debug.md](imu-init-debug.md) for the full final write-up. As of this writing, no
+attempt has successfully drawn a sustained live Path in RViz.
+
+**Session conclusion**: this project session's goal was to understand how the SLAM pipeline
+behaves with the iPhone Xs Max + TX2 combination, not to ship a product on it. Every controllable
+lever (CPU, crashes, network, parallax, transport determinism) was found and either fixed or
+ruled out. What remains — ORB-SLAM3's own multi-threaded execution-order non-determinism, and an
+unverified-but-leading rolling-shutter-distortion hypothesis — looks like a fundamental
+characteristic of this hardware combination, so the investigation was paused here.
 
 ## What's worth doing next
 
-1. **(Confirmed 2026-09-21) The threshold itself wasn't the bottleneck — pivot to improving
-   initial map quality.** A fair, identical-input comparison of 50 vs 30 on the baseline bag put
-   `start VIBA 1` at 0 on both (see above). Worth trying next: encouraging the post-reset 2-view
-   init to use wider parallax (tune min-parallax/wait-frame-count before bootstrapping), stronger
-   outlier rejection on the initial map, or the possibility that this particular baseline bag's
-   motion/scene is just intrinsically unsuited to IMU init (record a second baseline in a
-   brighter, more textured space and repeat the same bag-based comparison).
+1. **(Leading, unverified) Confirm the rolling-shutter-distortion hypothesis** — consistent with
+   the observed pattern: raw features, matching, and parallax are all fine, yet the failure is
+   specific to the stage requiring precise reprojection consistency. Save frames from the actual
+   moment of failure (right before a reset) and inspect them for geometric skew. See
+   `docs/imu-init-debug.md` for the full background.
 2. **Root-cause the "SLAM node disappears from the ROS2 graph" issue** — this session the same
    symptom was also observed on the `/rviz` node (its subscription doesn't survive without a
    restart). Repro under gdb to get a real backtrace of whichever thread is dying.
-3. **Investigate the long-lived bridge TCP connection degradation further** — `--recv-timeout 60`
-   sharply cut reconnect frequency but isn't a full fix. Check whether `TCP_NODELAY`/socket buffer
-   tuning or periodic proactive reconnects help.
-4. **Vehicle field testing / 17 Pro Max + LiDAR expansion** — the next stage explicitly listed
+3. **Vehicle field testing / 17 Pro Max + LiDAR expansion** — the next stage explicitly listed
    as Out of Scope in the #1 spec. Designed to be extensible just by adding
    `sensor_msgs/PointCloud2`, since it's topic-based (design intent only, not implemented). Makes
    sense to sequence this after tracking is confirmed stable.
+4. **(Low priority) Proper Tbc/IMU calibration via Kalibr** — the most frequent failure right now
+   happens in a purely vision-based code path before IMU init, so Tbc/IMU precision is unrelated
+   to it. Worth revisiting once IMU init itself starts happening reliably (after item 1 above is
+   resolved).
 
 ## To run a live session again
 
@@ -297,6 +307,8 @@ duplicated here. If you need more detailed background (why each step does what i
 - [bridge-node.md](bridge-node.md) — bridge node setup/running/verification
 - [euroc-validation.md](euroc-validation.md) — EuRoC-based SLAM node validation (#3)
 - [live-e2e-validation.md](live-e2e-validation.md) — full record of live e2e validation (#7)
+- [bag-replay-determinism.md](bag-replay-determinism.md) — why bag replays weren't deterministic
+  and how it was fixed (#20, PR #21)
 - [imu-init-debug.md](imu-init-debug.md) — root-cause procedure/evidence for IMU init never
   reaching VIBA1
 - [tx2-build-notes.md](tx2-build-notes.md) — TX2 build environment notes
