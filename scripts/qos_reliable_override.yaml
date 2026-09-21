@@ -1,0 +1,35 @@
+# (#20) ros2 bag play용 QoS override - bag 기반 결정적(deterministic) 재생 테스트 전용.
+#
+# best-effort QoS(기본 depth)로 재생하면 재생마다 다른 프레임/IMU가 조용히 드랍돼서,
+# 같은 bag을 재생해도 SLAM 노드가 매번 다른 입력을 받는다(docs/imu-init-debug.md 참고 -
+# 확인 결과 이미지 1184개 중 1182~1184개, IMU 16525개 중 16007~16522개로 재생마다 유실량이
+# 달랐다). 이 override를 --qos-profile-overrides-path로 넘기고, SLAM 노드도
+# reliable_sensor_qos:=true 파라미터로 같이 reliable로 띄우면 재생마다 완전히 동일한
+# 데이터가 도착한다(이미지/IMU 개수, 타임스탬프 시퀀스까지 동일함을 해시로 확인).
+#
+# depth는 FastRTPS 기본 리소스 한도(max_samples)보다 낮게 잡아야 한다 - 너무 크게 잡으면
+# "depth must be <= max_samples" 에러로 구독/발행 자체가 실패한다(실측: depth=2000/5000은
+# 실패, depth=200은 성공).
+#
+# 사용법:
+#   ros2 bag play <bag> --qos-profile-overrides-path scripts/qos_reliable_override.yaml
+#   ros2 run orbslam3 mono-inertial <vocab> <settings> --ros-args -p reliable_sensor_qos:=true
+#
+# 주의: 라이브 캡처(실제 iPhone) 검증에는 쓰지 말 것 - 브리지 노드는 항상 best-effort로
+# publish하므로(docs/ros2-topic-contract.md 계약), 이 override는 bag 재생 전용이다.
+
+/camera/image_raw:
+  reliability: reliable
+  durability: volatile
+  history: keep_last
+  depth: 200
+/camera/camera_info:
+  reliability: reliable
+  durability: volatile
+  history: keep_last
+  depth: 200
+/imu:
+  reliability: reliable
+  durability: volatile
+  history: keep_last
+  depth: 200
