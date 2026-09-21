@@ -25,7 +25,20 @@ final class TCPServer {
     }
 
     func start() {
-        let params = NWParameters.tcp
+        // (#20) 기본 NWParameters.tcp는 Nagle(지연 전송)이 켜져 있고 TCP keepalive가 꺼져
+        // 있다. IMU가 200Hz로 작은 패킷을 계속 보내는 프로토콜이라 Nagle이 지연/뭉침에
+        // 기여할 수 있고, keepalive가 없으면 실제로 끊긴 연결을 OS가 알아채기까지 오래
+        // 걸릴 수 있다 - 브리지 쪽 idle 타임아웃(ios_bridge_node.py의
+        // _recv_exact_idle_timeout)보다 먼저 TCP 계층에서 죽은 연결을 잡아내도록
+        // keepaliveIdle을 그보다 짧게 잡는다.
+        let tcpOptions = NWProtocolTCP.Options()
+        tcpOptions.noDelay = true
+        tcpOptions.enableKeepalive = true
+        tcpOptions.keepaliveIdle = 5
+        tcpOptions.keepaliveInterval = 2
+        tcpOptions.keepaliveCount = 3
+
+        let params = NWParameters(tls: nil, tcp: tcpOptions)
         guard let listener = try? NWListener(using: params, on: port) else {
             log.error("리스너 생성 실패 (포트 \(self.port.rawValue, privacy: .public))")
             return

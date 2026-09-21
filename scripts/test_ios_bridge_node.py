@@ -10,6 +10,7 @@ Foxy 워크스페이스를 source한 상태에서 실행해야 한다 (scripts/e
     python3 scripts/test_ios_bridge_node.py
 """
 import os
+import socket
 import sys
 import tempfile
 import threading
@@ -21,6 +22,7 @@ import rclpy  # noqa: E402
 from ios_bridge_node import (  # noqa: E402
     BridgeConnection,
     _make_ros_logger,
+    _recv_exact_idle_timeout,
     build_camera_info,
     build_image,
     build_imu,
@@ -138,6 +140,84 @@ def test_ros_logger_survives_alternating_severities():
     print("test_ros_logger_survives_alternating_severities 통과")
 
 
+class FakeClock:
+    """_recv_exact_idle_timeout()의 now= 주입점에 맞춘 제어 가능한 가짜 시계."""
+
+    def __init__(self):
+        self.t = 0.0
+
+    def __call__(self):
+        return self.t
+
+    def advance(self, dt):
+        self.t += dt
+
+
+class TrickleSocket:
+    """recv()를 부를 때마다 데이터를 조금씩 흘려보내면서 가짜 시계를 전진시킨다 - "느리지만
+    한 조각씩은 계속 들어오는" 연결을 흉내낸다. settimeout()은 기록만 한다(진짜로 블로킹하지
+    않음 - recv() 호출 자체가 clock.advance()로 "그만큼 기다렸다"를 흉내낸다)."""
+
+    def __init__(self, data, chunk_size, clock, per_chunk_delay):
+        self._data = data
+        self._pos = 0
+        self._chunk_size = chunk_size
+        self._clock = clock
+        self._per_chunk_delay = per_chunk_delay
+        self.timeout = None
+
+    def settimeout(self, t):
+        self.timeout = t
+
+    def recv(self, n):
+        self._clock.advance(self._per_chunk_delay)
+        chunk = self._data[self._pos : self._pos + min(n, self._chunk_size)]
+        self._pos += len(chunk)
+        return chunk
+
+
+def test_recv_exact_idle_timeout_tolerates_slow_but_steady_data():
+    """(#20) 각 조각 사이 간격은 idle_timeout보다 짧아도, 메시지 하나를 다 받는 데 걸리는
+    총 시간은 idle_timeout을 넘는 경우 - 예전의 "메시지 하나당 고정 deadline" 구현이었다면
+    실패했을 시나리오(총 6.0s > 고정 데드라인 1.0s)지만, idle 타임아웃에서는 매 recv()마다
+    데드라인이 갱신되므로 성공해야 한다."""
+    payload = bytes(range(100))  # 100바이트, 10바이트씩 10조각으로 받게 됨
+    clock = FakeClock()
+    sock = TrickleSocket(payload, chunk_size=10, clock=clock, per_chunk_delay=0.6)
+
+    result = _recv_exact_idle_timeout(sock, len(payload), idle_timeout=1.0, now=clock)
+
+    assert result == payload
+    assert abs(clock.t - 6.0) < 1e-9, "10조각 * 0.6s = 6.0s 경과했어야 한다(각 조각 간격은 idle_timeout 밑)"
+    print("test_recv_exact_idle_timeout_tolerates_slow_but_steady_data 통과")
+
+
+def test_recv_exact_idle_timeout_still_detects_genuine_stall():
+    """(#20) 정말로 데이터가 멈추면(=기반 소켓 자체가 settimeout 경과 후 socket.timeout을
+    던지면) idle 타임아웃으로 바꾼 뒤에도 여전히 타임아웃이 나야 한다 - #6의 "무한 대기 없음"
+    요구사항이 이번 리팩터로 깨지지 않았는지 확인."""
+
+    class NeverRespondsSocket:
+        def __init__(self):
+            self.timeout = None
+
+        def settimeout(self, t):
+            self.timeout = t
+
+        def recv(self, n):
+            raise socket.timeout("simulated: no data within settimeout")
+
+    sock = NeverRespondsSocket()
+    try:
+        _recv_exact_idle_timeout(sock, 10, idle_timeout=1.0)
+        raise AssertionError("socket.timeout이 났어야 한다")
+    except socket.timeout:
+        pass
+
+    assert sock.timeout is not None and 0 < sock.timeout <= 1.0
+    print("test_recv_exact_idle_timeout_still_detects_genuine_stall 통과")
+
+
 class FakeSocket:
     """recv()가 주어진 바이트 스트림을 순서대로 반환하다가 소진되면 지정한 예외를 던져
     실제 연결 끊김(ConnectionResetError 등)을 흉내낸다."""
@@ -211,8 +291,9 @@ def test_reconnect_and_resume():
     assert len(imu_received) == 1 and imu_received[0]["timestamp_ns"] == 2
 
     # connect/recv 모두 타임아웃이 실제로 걸렸는지 (무한 대기 없음 요구사항의 핵심 근거).
-    # _recv_exact_before_deadline()은 메시지 하나를 읽는 동안 남은 시간을 recv()마다 다시
-    # 계산해서 넘기므로 recv_timeout보다 살짝 작은 값이 찍힌다 (경과 시간만큼 줄어듦).
+    # _recv_exact_idle_timeout()은 recv()를 부를 때마다 idle 데드라인을 recv_timeout만큼
+    # 다시 미루므로, 여기선 recv_timeout보다 살짝 작은 값이 찍힌다 (계산~settimeout 사이의
+    # 경과 시간만큼 줄어듦).
     assert sock1.timeout is not None and 0 < sock1.timeout <= 1.0
     assert sock2.timeout is not None and 0 < sock2.timeout <= 1.0
 
@@ -228,6 +309,8 @@ def self_test():
     test_load_calibration_rejects_malformed_yaml()
     test_load_real_calibration_file()
     test_ros_logger_survives_alternating_severities()
+    test_recv_exact_idle_timeout_tolerates_slow_but_steady_data()
+    test_recv_exact_idle_timeout_still_detects_genuine_stall()
     test_reconnect_and_resume()
     print("모든 테스트 통과")
     return 0
