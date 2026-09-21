@@ -1,4 +1,4 @@
-# Handoff (as of 2026-09-20)
+# Handoff (as of 2026-09-21)
 
 > 한국어 버전은 [여기](handoff.ko.md)에 있습니다.
 
@@ -155,16 +155,20 @@ to the failure patterns actually observed in this project). Summary:
   IMU isn't initialized yet (it only relaxes to 15 *after* IMU init) — effectively a chicken-and-egg
   loop: "50 required until IMU init, but IMU init needs surviving past 50." Measured inlier counts
   mostly clustered 25-48, repeatedly failing just under the threshold.
-- **The 50→30 threshold-lowering experiment was inconclusive**: each retry involved genuinely
-  different walking motion (no way to reproduce it exactly), so direct comparison wasn't valid
-  (one attempt saw inliers drop as low as 1-9 — possibly just rougher motion that time), and
-  `start VIBA` stayed at 0. **This experimental code has been reverted.**
 - **Recorded one walking session with `ros2 bag record` as a repeatable baseline for comparison**
   (`/mnt/ssd/live_e2e/baseline_walk/walk_bag`, 215s, 1184 images/16525 IMU messages — note:
   best-effort QoS means some images were likely dropped during bag recording itself, so the
   recorded frame rate may be lower than the original; treat it as a reference, not a perfect
   reproduction). Confirmed `ros2 bag play` lets code/config changes be compared against identical
   input without needing to walk again each time.
+- **Re-ran the 50→30 threshold experiment against this baseline bag for a definitive answer
+  (rejected)**: the first live attempts couldn't be compared fairly (motion differed each retry),
+  so this time the same bag was replayed against both builds (default 50 vs 30) back to back —
+  reset frequency dropped (`New Map created` 50→40, `Fail to track local map!` 49→38), but
+  **`start VIBA 1` stayed at 0 on both**. Same input, same result, so this gate is confirmed not
+  to be the sole bottleneck. **Experimental code reverted and rebuilt.** The real bottleneck looks
+  less like the threshold itself and more like the post-reset local-map match quality being
+  structurally insufficient for this bag's motion/scene conditions.
 - **Found one more crash while replaying this baseline bag** (`EXIT_CODE=245`, log cutting off
   right after `"Not preintegrated measurement"`) — a path live testing had never hit. Found four
   call sites in `Optimizer.cc`'s `InertialOptimization`/`FullInertialBA` that dereferenced a
@@ -184,12 +188,13 @@ live Path in RViz.
 
 ## What's worth doing next
 
-1. **Attack the `TrackLocalMap()` post-reset 50-inlier gate more precisely** — the core bottleneck
-   identified in `docs/imu-init-debug.md`. Simply lowering the threshold was inconclusive (motion
-   isn't reproducible live) — now that a baseline bag exists, **compare threshold values properly
-   against identical replayed input**. Alternatively, instead of touching the threshold, look at
-   improving the initial map's point count/quality right after reset (wider-parallax 2-view init,
-   stronger outlier rejection on the initial map).
+1. **(Confirmed 2026-09-21) The threshold itself wasn't the bottleneck — pivot to improving
+   initial map quality.** A fair, identical-input comparison of 50 vs 30 on the baseline bag put
+   `start VIBA 1` at 0 on both (see above). Worth trying next: encouraging the post-reset 2-view
+   init to use wider parallax (tune min-parallax/wait-frame-count before bootstrapping), stronger
+   outlier rejection on the initial map, or the possibility that this particular baseline bag's
+   motion/scene is just intrinsically unsuited to IMU init (record a second baseline in a
+   brighter, more textured space and repeat the same bag-based comparison).
 2. **Root-cause the "SLAM node disappears from the ROS2 graph" issue** — this session the same
    symptom was also observed on the `/rviz` node (its subscription doesn't survive without a
    restart). Repro under gdb to get a real backtrace of whichever thread is dying.
