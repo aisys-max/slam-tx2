@@ -17,6 +17,7 @@ ROS2 Foxy 워크스페이스를 source한 상태에서):
 단위 테스트: scripts/test_ios_bridge_node.py 참고 (ROS2 Foxy 소싱 필요).
 """
 import argparse
+import array
 import socket
 import sys
 import threading
@@ -71,7 +72,12 @@ def stamp_from_ns(header, ts_ns):
 def build_image(frame):
     """decode_frame() 결과 -> sensor_msgs/Image (mono8). stride는 그대로 step에 넣는다 -
     ROS Image.step은 실제 행 바이트 수를 뜻하므로 카메라가 width보다 넓게 패딩해도 크롭 없이
-    바로 쓸 수 있다."""
+    바로 쓸 수 있다.
+
+    msg.data에 array.array를 미리 감싸서 넘긴다 - rosidl이 생성하는 data.setter는 값이 bytes/list
+    등 array.array가 아니면 __debug__ 블록에서 원소 30만개(640x480)를 두 번 파이썬 레벨로 순회하며
+    타입/범위를 검증한다(#10 프로파일링으로 확인: 이 경로만으로 ~157ms/frame, 상한 ~6.4Hz - 실측
+    병목과 일치). array.array를 직접 넘기면 그 검증을 건너뛰는 fast path를 탄다."""
     msg = Image()
     stamp_from_ns(msg.header, frame["timestamp_ns"])
     msg.height = frame["height"]
@@ -79,7 +85,7 @@ def build_image(frame):
     msg.encoding = "mono8"
     msg.is_bigendian = 0
     msg.step = frame["stride"]
-    msg.data = frame["pixels"]
+    msg.data = array.array("B", frame["pixels"])
     return msg
 
 
