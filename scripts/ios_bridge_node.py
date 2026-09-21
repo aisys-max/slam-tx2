@@ -40,21 +40,29 @@ from test_ios_tcp_client import (  # noqa: E402
 )
 
 
-def _recv_exact_before_deadline(sock, n, deadline):
-    """recv_exact()와 동일하지만 개별 recv() 호출마다 타임아웃을 새로 주는 대신 메시지 하나를
-    읽는 전체 시간을 deadline으로 못박는다. sock.settimeout()을 매 recv() 호출 전에 초기화하면
-    (recv_exact()가 그렇다) 느리게 한 바이트씩 흘려보내는 연결에서 메시지 하나를 읽는 데 걸리는
-    시간이 무한정 늘어날 수 있어 - #6의 "무한 대기 없음" 요구사항이 깨진다."""
+def _recv_exact_idle_timeout(sock, n, idle_timeout, now=time.monotonic):
+    """recv_exact()와 동일하지만, 데이터가 들어오는 한 무한정 기다리고 **들어오는 게 멈췄을
+    때만**(idle_timeout초 동안 recv() 진전이 없으면) 타임아웃을 낸다.
+
+    (#20) 예전엔 메시지 하나(예: ~300KB 프레임)를 다 읽는 전체 시간에 고정 deadline을 걸어서,
+    데이터가 꾸준히 조금씩 들어오고 있는 느리지만 멀쩡한 연결도 큰 프레임 하나면 타임아웃에
+    걸릴 수 있었다 - recv()가 실제로 데이터를 반환할 때마다 deadline을 뒤로 미뤄서, "느림"과
+    "멈춤"을 구분한다. sock.settimeout()을 매 recv() 호출 전에 초기화하는 이유는 여전히
+    같다(recv_exact()가 그렇듯 개별 recv() 호출마다 타임아웃을 새로 안 주면, 느리게 한
+    바이트씩 흘려보내는 연결에서 전체가 무한정 늘어날 수 있어 - #6의 "무한 대기 없음"
+    요구사항이 깨진다) - 다만 그 타임아웃 값 자체를 매 recv()마다 idle_timeout으로 리셋한다."""
     buf = bytearray()
+    deadline = now() + idle_timeout
     while len(buf) < n:
-        remaining = deadline - time.monotonic()
+        remaining = deadline - now()
         if remaining <= 0:
-            raise socket.timeout(f"{n}바이트 수신 중 recv_timeout 초과 ({len(buf)}/{n} 바이트만 받음)")
+            raise socket.timeout(f"{n}바이트 수신 중 {idle_timeout}초 이상 idle ({len(buf)}/{n} 바이트만 받음)")
         sock.settimeout(remaining)
         chunk = sock.recv(n - len(buf))
         if not chunk:
             raise ProtocolError(f"연결이 끊김 ({len(buf)}/{n} 바이트만 받음)")
         buf.extend(chunk)
+        deadline = now() + idle_timeout
     return bytes(buf)
 
 FRAME_ID = "camera_link"  # docs/ros2-topic-contract.md: 이번 MVP는 단일 frame_id
@@ -192,8 +200,7 @@ class BridgeConnection:
 
     def _stream(self, sock, stop_event):
         while not stop_event.is_set():
-            deadline = time.monotonic() + self.recv_timeout
-            msg_type, payload = read_message(lambda n: _recv_exact_before_deadline(sock, n, deadline))
+            msg_type, payload = read_message(lambda n: _recv_exact_idle_timeout(sock, n, self.recv_timeout))
             if msg_type == TYPE_FRAME:
                 self.on_frame(decode_frame(payload))
             elif msg_type == TYPE_IMU:
@@ -270,7 +277,7 @@ def run_node(host, port, calibration_path, connect_timeout, recv_timeout, retry_
         stop_event.set()
         conn_thread.join(timeout=connect_timeout + recv_timeout + 1.0)
         if conn_thread.is_alive():
-            # _recv_exact_before_deadline()의 recv_timeout 경계보다 오래 살아있다는 건 뭔가 이
+            # _recv_exact_idle_timeout()의 recv_timeout 경계보다 오래 살아있다는 건 뭔가 이
             # 상한을 벗어났다는 뜻이다 - node.destroy_node() 이후에도 그 스레드가
             # publish()를 부를 수 있으니 원인 파악용으로 명확히 남긴다.
             node.get_logger().warning("연결 스레드가 예상 시간 안에 종료되지 않음 (데몬 스레드로 계속 실행됨)")
